@@ -1,0 +1,55 @@
+# Build artifacts
+build/
+*.so
+*.a
+*.o
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+.venv/
+*.egg-info/
+dist/
+*.egg
+
+# Python compiled files
+*.so
+*.pyc
+__pycache__/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+
+# Data and results (usually large)
+data/
+index/
+results/
+plot/
+
+# Log files
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Old build artifacts (if any)
+qvcache*.so
+*.cpython-*.so
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile

@@ -1,0 +1,71 @@
+# Build artifacts
+build/
+*.so
+*.a
+*.o
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+*.egg
+
+# Python virtual environments
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Data directories (usually large)
+DiskANN/data
+DiskANN/plot
+DiskANN/index
+DiskANN/results
+
+Greator/data
+Greator/index
+Greator/results
+
+results/
+index/
+data/
+plot/
+
+# Python compiled files
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+
+# Compiled extensions (will be rebuilt)
+*.so
+qvcache*.so
+*.cpython-*.so
+
+# CMake
+CMakeCache.txt
+CMakeFiles
+cmake_install.cmake
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
+
+# Visualization
+plots/
+backend_experiments
+dataset_experiments
+
+# Third-party dependencies (cloned by build scripts)
+backends/SPTAG/ThirdParty/zstd/

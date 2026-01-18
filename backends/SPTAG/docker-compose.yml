@@ -1,0 +1,19 @@
+services:
+  sptag:
+    container_name: sptag_service
+    build: .
+    volumes:
+      - .:/app
+    working_dir: /app
+    ports:
+      - "8000:8000"
+    networks:
+      - sptag_network
+    stdin_open: true
+    tty: true
+    entrypoint: bash
+
+networks:
+  sptag_network:
+    driver: bridge
+
