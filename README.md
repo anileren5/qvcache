@@ -26,7 +26,7 @@ docker compose up -d
 After the containers are created, enter the QVCache container where all experiments and scripts are executed:
 
 ```bash
-docker exec -it qvcache-container /bin/bash
+docker exec -it qvcache /bin/bash
 ```
 
 ---
