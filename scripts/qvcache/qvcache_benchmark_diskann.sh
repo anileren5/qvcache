@@ -10,18 +10,18 @@ set -e
 cd "$(dirname "$0")/../.." || exit 1
 
 # Define variables
-DATASET="siftsmall"
+DATASET="sift"
 DATA_TYPE="float"
 DATA_PATH="data/$DATASET/${DATASET}_base.bin"
 
 # Noisy query parameters
 N_SPLIT=10
-N_SPLIT_REPEAT=20
+N_SPLIT_REPEAT=10
 NOISE_RATIO=0.01
 
 # Window parameters
 WINDOW_SIZE=4
-N_REPEAT=3
+N_REPEAT=2
 STRIDE=1
 N_ROUND=1
 
@@ -34,12 +34,12 @@ GROUNDTRUTH_PATH="data/$DATASET/${DATASET}_groundtruth_nsplit-${N_SPLIT}_nrepeat
 # QVCache parameters
 R=64
 MEMORY_L=32  
-DISK_L=128
+DISK_L=32
 K=10
 B=8
 M=8
 ALPHA=1.2
-SEARCH_THREADS=24
+SEARCH_THREADS=1
 BUILD_THREADS=8
 DISK_INDEX_PREFIX="./index/${DATASET}/${DATASET}"
 DISK_INDEX_ALREADY_BUILT=1
@@ -49,22 +49,23 @@ P=0.90
 DEVIATION_FACTOR=0.25
 SECTOR_LEN=4096
 USE_REGIONAL_THETA=1 # Set to 0 to use global theta instead of regional theta
+LEARN_PCA_FROM_QUERIES="${LEARN_PCA_FROM_QUERIES:-0}"
 PCA_DIM=16 # Set to desired PCA dimension (e.g., 16)
 BUCKETS_PER_DIM=8 # Set to desired number of buckets per PCA dimension (e.g., 4)
-MEMORY_INDEX_MAX_POINTS=100000 # Set to desired max points for memory index
+MEMORY_INDEX_MAX_POINTS=200000 # Set to desired max points for memory index
 MAX_REGIONS=1000000 # Maximum number of regions for regional theta (default: unlimited = max size_t, set to a specific number to limit)
 N_ASYNC_INSERT_THREADS=4 # Number of async insert threads
 LAZY_THETA_UPDATES=1 # Set to 1 to enable lazy theta updates, 0 for immediate updates
-NUMBER_OF_MINI_INDEXES=16 # Number of mini indexes for shadow cycling
+NUMBER_OF_MINI_INDEXES=4 # Number of mini indexes for shadow cycling
 SEARCH_MINI_INDEXES_IN_PARALLEL=false # Set to true to search mini indexes in parallel
 MAX_SEARCH_THREADS=32 # Maximum threads for parallel search
 SEARCH_STRATEGY="SEQUENTIAL_LRU_ADAPTIVE" # Search strategy: SEQUENTIAL_LRU_STOP_FIRST_HIT, SEQUENTIAL_LRU_ADAPTIVE, SEQUENTIAL_ALL, PARALLEL
 METRIC="l2" # Distance metric: "l2", "cosine" etc.
 
 # Validate window parameters
-MIN_SPLIT_REPEAT=$(( (WINDOW_SIZE / STRIDE) * N_REPEAT * N_ROUND ))
+MIN_SPLIT_REPEAT=$(( 1 + (WINDOW_SIZE / STRIDE) * N_REPEAT * N_ROUND ))
 if [ "$N_SPLIT_REPEAT" -lt "$MIN_SPLIT_REPEAT" ]; then
-    echo "Error: n_split_repeat ($N_SPLIT_REPEAT) must be >= (window_size / stride) * n_repeat * n_round = $MIN_SPLIT_REPEAT"
+    echo "Error: n_split_repeat ($N_SPLIT_REPEAT) must be >= 1 + (window_size / stride) * n_repeat * n_round = $MIN_SPLIT_REPEAT"
     exit 1
 fi
 
@@ -119,6 +120,7 @@ echo ""
   --deviation_factor "$DEVIATION_FACTOR" \
   --sector_len "$SECTOR_LEN" \
   --use_regional_theta "$USE_REGIONAL_THETA" \
+  --learn_pca_from_queries "$LEARN_PCA_FROM_QUERIES" \
   --pca_dim "$PCA_DIM" \
   --buckets_per_dim "$BUCKETS_PER_DIM" \
   --memory_index_max_points "$MEMORY_INDEX_MAX_POINTS" \

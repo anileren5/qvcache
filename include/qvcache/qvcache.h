@@ -23,6 +23,8 @@
 #include <deque>
 #include <limits>
 #include <chrono>
+#include <string>
+#include <stdexcept>
 
 namespace qvcache {
 
@@ -67,6 +69,15 @@ namespace qvcache {
             std::atomic<bool> eviction_in_progress{false};
             std::future<void> eviction_future;
             std::mutex eviction_mutex;
+
+            // Aker: cache-layer time up to (not including) backend search, for miss_penalty.
+            inline static thread_local std::chrono::high_resolution_clock::time_point tls_search_t0{};
+            inline static thread_local double tls_cache_lookup_ms{0.0};
+
+            void note_cache_lookup_end() {
+                tls_cache_lookup_ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::high_resolution_clock::now() - tls_search_t0).count();
+            }
 
             // --- PCA utilities ---
             std::unique_ptr<PCAUtils<T>> pca_utils;
@@ -624,6 +635,7 @@ namespace qvcache {
                 res.clear();
                 
                 // No hit found in memory indices, search disk using the backend interface
+                note_cache_lookup_end();
                 this->backend->search(query_ptr, (uint64_t)K, query_result_tags_ptr, query_result_dists_ptr, nullptr, backend_stats);
                 std::vector<uint32_t> tags_to_insert(query_result_tags_ptr, query_result_tags_ptr + K);
                 
@@ -805,6 +817,7 @@ namespace qvcache {
                 }
                 
                 // No hit found in memory indices, search disk using the backend interface
+                note_cache_lookup_end();
                 this->backend->search(query_ptr, (uint64_t)K, query_result_tags_ptr, query_result_dists_ptr, nullptr, backend_stats);
                 std::vector<uint32_t> tags_to_insert(query_result_tags_ptr, query_result_tags_ptr + K);
                 
@@ -884,6 +897,9 @@ namespace qvcache {
 
 
         public:
+            // Aker: cache-layer time on the last search() of this thread (ms).
+            double last_cache_lookup_ms() const { return tls_cache_lookup_ms; }
+
             template <typename... Args>
             QVCache(const std::string& data_path,
                         const std::string& pca_prefix,
@@ -907,7 +923,9 @@ namespace qvcache {
                         bool search_mini_indexes_in_parallel_ = false,
                         size_t max_search_threads_ = 32,
                         diskann::Metric metric_ = diskann::L2,
-                        std::unique_ptr<BackendInterface<T, TagT>> disk_backend_ptr = nullptr)
+                        std::unique_ptr<BackendInterface<T, TagT>> disk_backend_ptr = nullptr,
+                        bool learn_pca_from_queries = false,
+                        const std::string& query_path = "")
                         : data_path(data_path),
                         pca_prefix(pca_prefix),
                         search_threads(search_threads),
@@ -987,8 +1005,12 @@ namespace qvcache {
                 std::cout << "QVCache built successfully with LRU eviction policy!" << std::endl;
 
                 // PCA is constructed at construction time using Eigen. Eigen is required.
+                // Query-fit PCA uses a separate file so it never reuses a data-fit .pca.bin.
                 if (use_regional_theta) {
-                    pca_utils = std::make_unique<PCAUtils<T>>(dim, pca_dim, buckets_per_dim, pca_prefix, metric, max_regions_);
+                    const std::string pca_file_prefix = learn_pca_from_queries
+                        ? (pca_prefix + ".query")
+                        : pca_prefix;
+                    pca_utils = std::make_unique<PCAUtils<T>>(dim, pca_dim, buckets_per_dim, pca_file_prefix, metric, max_regions_);
                     bool loaded = false;
                     if constexpr (std::is_floating_point<T>::value) {
                         loaded = pca_utils->load_pca_from_file(false);
@@ -998,15 +1020,32 @@ namespace qvcache {
                     if (loaded) {
                         std::cout << "[QVCache] Loaded PCA from file: " << pca_utils->get_pca_filename_for_logging() << std::endl;
                     } else {
-                        std::cout << "[QVCache] No PCA file found or mismatch, running PCA..." << std::endl;
-                        T* data = nullptr;
-                        size_t sampled_num_points;
-                        diskann::get_bin_metadata(data_path, num_points, dim);
-                        aligned_dim = ROUND_UP(dim, 8);
-                        load_sampled_data(data_path, data, sampled_num_points, aligned_dim, num_points);
-                        std::cout << "[QVCache] Loaded " << sampled_num_points << " sampled points from " << data_path << std::endl;
-                        pca_utils->construct_pca_from_data(data, sampled_num_points, aligned_dim, pca_prefix);
-                        diskann::aligned_free(data);
+                        T* pca_data = nullptr;
+                        size_t sampled_num_points = 0;
+                        size_t pca_aligned_dim = aligned_dim;
+                        if (learn_pca_from_queries) {
+                            if (query_path.empty()) {
+                                throw std::runtime_error("[QVCache] learn_pca_from_queries=true but query_path is empty");
+                            }
+                            size_t q_num = 0, q_dim = 0;
+                            diskann::load_aligned_bin<T>(query_path, pca_data, q_num, q_dim, pca_aligned_dim);
+                            if (q_dim != dim) {
+                                diskann::aligned_free(pca_data);
+                                throw std::runtime_error("[QVCache] query dim (" + std::to_string(q_dim) +
+                                                         ") != data dim (" + std::to_string(dim) + ")");
+                            }
+                            sampled_num_points = q_num;
+                            std::cout << "[QVCache] Learning PCA from " << sampled_num_points
+                                      << " queries in " << query_path << std::endl;
+                        } else {
+                            std::cout << "[QVCache] No PCA file found or mismatch, running PCA on data..." << std::endl;
+                            diskann::get_bin_metadata(data_path, num_points, dim);
+                            pca_aligned_dim = ROUND_UP(dim, 8);
+                            load_sampled_data(data_path, pca_data, sampled_num_points, pca_aligned_dim, num_points);
+                            std::cout << "[QVCache] Loaded " << sampled_num_points << " sampled points from " << data_path << std::endl;
+                        }
+                        pca_utils->construct_pca_from_data(pca_data, sampled_num_points, pca_aligned_dim, pca_file_prefix);
+                        diskann::aligned_free(pca_data);
                     }
                 } else {
                     std::cout << "[QVCache] Skipping PCA construction (use_regional_theta is false)." << std::endl;
@@ -1032,6 +1071,8 @@ namespace qvcache {
 
             bool search(const T* query_ptr, uint32_t K, uint32_t* query_result_tags_ptr, std::vector<T *>& res, float* query_result_dists_ptr, void* backend_stats) {
                 // Get current active insert index ID (atomic read)
+                tls_search_t0 = std::chrono::high_resolution_clock::now();
+                tls_cache_lookup_ms = 0.0;
                 size_t current_active_id = active_insert_index_id.load();
                 
                 // Search all memory indices based on configured strategy
@@ -1057,6 +1098,7 @@ namespace qvcache {
                 else {
                     
                     // Search disk using the backend interface
+                    note_cache_lookup_end();
                     this->backend->search(query_ptr, (uint64_t)K, query_result_tags_ptr, query_result_dists_ptr, nullptr, backend_stats);
                     std::vector<uint32_t> tags_to_insert(query_result_tags_ptr, query_result_tags_ptr + K);
                     

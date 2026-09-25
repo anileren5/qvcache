@@ -356,13 +356,14 @@ void experiment_benchmark(
     int window_size,
     int n_repeat,
     int stride,
-    int n_round
+    int n_round,
+    bool learn_pca_from_queries
 ) {
     // Validate window parameters
-    int min_split_repeat = (window_size / stride) * n_repeat * n_round;
+    int min_split_repeat = 1 + (window_size / stride) * n_repeat * n_round;
     if (n_split_repeat < min_split_repeat) {
-        std::cerr << "Error: n_split_repeat (" << n_split_repeat << ") must be >= (window_size / stride) * n_repeat * n_round = " 
-                  << min_split_repeat << std::endl;
+        std::cerr << "Error: n_split_repeat (" << n_split_repeat << ") must be >= 1 + (window_size / stride) * n_repeat * n_round = " 
+                  << min_split_repeat << " (copy 0 skipped; each split visit needs a fresh perturbation)" << std::endl;
         exit(1);
     }
     
@@ -391,7 +392,9 @@ void experiment_benchmark(
        search_mini_indexes_in_parallel,
        max_search_threads,
        metric,
-       std::move(sptag_backend)
+       std::move(sptag_backend),
+       learn_pca_from_queries,
+       query_path
     );
 
     if (search_strategy == "SEQUENTIAL_LRU_STOP_FIRST_HIT") {
@@ -426,6 +429,8 @@ void experiment_benchmark(
     // Random number generator for shuffling
     std::random_device rd;
     std::mt19937 g(rd());
+
+    std::vector<int> next_copy(static_cast<size_t>(n_splits), 1);
     
     // Process windows in rounds; each round ends when the last split of a window reaches the last global split.
     int window_idx = 0;
@@ -437,7 +442,7 @@ void experiment_benchmark(
                          window_idx, window_start, window_end);
         
         // Process each repeat separately within this window
-        for (int repeat_idx = 0; repeat_idx < n_repeat && repeat_idx < n_split_repeat; ++repeat_idx) {
+        for (int repeat_idx = 0; repeat_idx < n_repeat; ++repeat_idx) {
             // Collect queries from this repeat across all splits in the window
             struct QueryInfo {
                 size_t query_offset;
@@ -448,8 +453,14 @@ void experiment_benchmark(
             
             for (int offset = 0; offset < window_size; ++offset) {
                 int split_idx = window_start + offset;
+                int copy_idx = next_copy[static_cast<size_t>(split_idx)]++;
+                if (copy_idx >= n_split_repeat) {
+                    std::cerr << "Error: split " << split_idx << " needs copy " << copy_idx
+                              << " but n_split_repeat=" << n_split_repeat << std::endl;
+                    exit(1);
+                }
                 size_t split_offset = split_idx * n_split_repeat * queries_per_original_split;
-                size_t copy_offset = repeat_idx * queries_per_original_split;
+                size_t copy_offset = static_cast<size_t>(copy_idx) * queries_per_original_split;
                 size_t query_start = split_offset + copy_offset;
                 size_t query_end = std::min(query_start + queries_per_original_split, query_num);
                 
@@ -557,6 +568,7 @@ int main(int argc, char **argv) {
     int n_repeat;
     int stride;
     int n_round;
+    int learn_pca_from_queries = 0;
     po::options_description desc;
     try {
         po::options_description desc("Allowed options");
@@ -596,7 +608,8 @@ int main(int argc, char **argv) {
             ("window_size", po::value<int>(&window_size)->required(), "Window size (number of splits per window)")
             ("n_repeat", po::value<int>(&n_repeat)->required(), "N_repeat (number of copies per split in window)")
             ("stride", po::value<int>(&stride)->required(), "Stride (step size for window advancement)")
-            ("n_round", po::value<int>(&n_round)->default_value(1), "Number of times to cycle windows over splits (wrapping)");
+            ("n_round", po::value<int>(&n_round)->default_value(1), "Number of times to cycle windows over splits (wrapping)")
+            ("learn_pca_from_queries", po::value<int>(&learn_pca_from_queries)->default_value(0), "Fit regional PCA on the query file (1) instead of sampled data vectors (0)");
         po::variables_map vm;
         po::store(po::parse_command_line(argc, argv, desc), vm);
         if (vm.count("help")) {
@@ -661,30 +674,31 @@ int main(int argc, char **argv) {
         "  \"window_size\": {},\n"
         "  \"n_repeat\": {},\n"
         "  \"stride\": {},\n"
-        "  \"n_round\": {}\n"
+        "  \"n_round\": {},\n"
+        "  \"learn_pca_from_queries\": {}\n"
         "}}",
-        data_type, data_path, query_path, groundtruth_path, memory_L, K, B, M, search_threads, alpha, use_reconstructed_vectors, p, deviation_factor, sector_len, use_regional_theta, pca_dim, buckets_per_dim, memory_index_max_points, max_regions, n_splits, n_split_repeat, n_async_insert_threads, lazy_theta_updates, number_of_mini_indexes, search_mini_indexes_in_parallel, max_search_threads, search_strategy, metric_str, sptag_server_addr, sptag_server_port, vector_dim, window_size, n_repeat, stride, n_round);
+        data_type, data_path, query_path, groundtruth_path, memory_L, K, B, M, search_threads, alpha, use_reconstructed_vectors, p, deviation_factor, sector_len, use_regional_theta, pca_dim, buckets_per_dim, memory_index_max_points, max_regions, n_splits, n_split_repeat, n_async_insert_threads, lazy_theta_updates, number_of_mini_indexes, search_mini_indexes_in_parallel, max_search_threads, search_strategy, metric_str, sptag_server_addr, sptag_server_port, vector_dim, window_size, n_repeat, stride, n_round, learn_pca_from_queries);
     if (data_type == "float") {
         if (vector_dim == 0) {
             size_t num_vectors, dim;
             diskann::get_bin_metadata(data_path, num_vectors, dim);
             vector_dim = dim;
         }
-        experiment_benchmark<float>(data_type, data_path, query_path, groundtruth_path, memory_L, K, B, M, alpha, search_threads, use_reconstructed_vectors, p, deviation_factor, memory_index_max_points, use_regional_theta, pca_dim, buckets_per_dim, max_regions, n_splits, n_split_repeat, n_async_insert_threads, lazy_theta_updates, number_of_mini_indexes, search_mini_indexes_in_parallel, max_search_threads, search_strategy, metric, sptag_server_addr, sptag_server_port, vector_dim, window_size, n_repeat, stride, n_round);
+        experiment_benchmark<float>(data_type, data_path, query_path, groundtruth_path, memory_L, K, B, M, alpha, search_threads, use_reconstructed_vectors, p, deviation_factor, memory_index_max_points, use_regional_theta, pca_dim, buckets_per_dim, max_regions, n_splits, n_split_repeat, n_async_insert_threads, lazy_theta_updates, number_of_mini_indexes, search_mini_indexes_in_parallel, max_search_threads, search_strategy, metric, sptag_server_addr, sptag_server_port, vector_dim, window_size, n_repeat, stride, n_round, (bool)learn_pca_from_queries);
     } else if (data_type == "int8") {
         if (vector_dim == 0) {
             size_t num_vectors, dim;
             diskann::get_bin_metadata(data_path, num_vectors, dim);
             vector_dim = dim;
         }
-        experiment_benchmark<int8_t>(data_type, data_path, query_path, groundtruth_path, memory_L, K, B, M, alpha, search_threads, use_reconstructed_vectors, p, deviation_factor, memory_index_max_points, use_regional_theta, pca_dim, buckets_per_dim, max_regions, n_splits, n_split_repeat, n_async_insert_threads, lazy_theta_updates, number_of_mini_indexes, search_mini_indexes_in_parallel, max_search_threads, search_strategy, metric, sptag_server_addr, sptag_server_port, vector_dim, window_size, n_repeat, stride, n_round);
+        experiment_benchmark<int8_t>(data_type, data_path, query_path, groundtruth_path, memory_L, K, B, M, alpha, search_threads, use_reconstructed_vectors, p, deviation_factor, memory_index_max_points, use_regional_theta, pca_dim, buckets_per_dim, max_regions, n_splits, n_split_repeat, n_async_insert_threads, lazy_theta_updates, number_of_mini_indexes, search_mini_indexes_in_parallel, max_search_threads, search_strategy, metric, sptag_server_addr, sptag_server_port, vector_dim, window_size, n_repeat, stride, n_round, (bool)learn_pca_from_queries);
     } else if (data_type == "uint8") {
         if (vector_dim == 0) {
             size_t num_vectors, dim;
             diskann::get_bin_metadata(data_path, num_vectors, dim);
             vector_dim = dim;
         }
-        experiment_benchmark<uint8_t>(data_type, data_path, query_path, groundtruth_path, memory_L, K, B, M, alpha, search_threads, use_reconstructed_vectors, p, deviation_factor, memory_index_max_points, use_regional_theta, pca_dim, buckets_per_dim, max_regions, n_splits, n_split_repeat, n_async_insert_threads, lazy_theta_updates, number_of_mini_indexes, search_mini_indexes_in_parallel, max_search_threads, search_strategy, metric, sptag_server_addr, sptag_server_port, vector_dim, window_size, n_repeat, stride, n_round);
+        experiment_benchmark<uint8_t>(data_type, data_path, query_path, groundtruth_path, memory_L, K, B, M, alpha, search_threads, use_reconstructed_vectors, p, deviation_factor, memory_index_max_points, use_regional_theta, pca_dim, buckets_per_dim, max_regions, n_splits, n_split_repeat, n_async_insert_threads, lazy_theta_updates, number_of_mini_indexes, search_mini_indexes_in_parallel, max_search_threads, search_strategy, metric, sptag_server_addr, sptag_server_port, vector_dim, window_size, n_repeat, stride, n_round, (bool)learn_pca_from_queries);
     } else {
         std::cerr << "Unsupported data type: " << data_type << std::endl;
     }

@@ -162,7 +162,7 @@ class PgVectorBackend:
         
         print(f"PgVectorBackend initialized with table '{table_name}' (metric: {self.metric})")
     
-    def _load_data_from_file(self, data_path: str, batch_size: int = 1000):
+    def _load_data_from_file(self, data_path: str, batch_size: int = 10000):
         """
         Load vectors from a binary file (DiskANN format) into PostgreSQL.
         
@@ -173,53 +173,61 @@ class PgVectorBackend:
         print(f"Loading vectors from {data_path} into PostgreSQL...")
         
         # Read metadata (first 2 uint32_t: num_vectors, dim)
+        file_size = os.path.getsize(data_path)
         with open(data_path, 'rb') as f:
-            num_vectors = np.frombuffer(f.read(4), dtype=np.uint32)[0]
+            num_vectors = int(np.frombuffer(f.read(4), dtype=np.uint32)[0])
             dim = int(np.frombuffer(f.read(4), dtype=np.uint32)[0])
             
             if dim != self.dim:
                 raise ValueError(f"Dimension mismatch: expected {self.dim}, got {dim}")
-            
-            print(f"Loading {num_vectors} vectors of dimension {dim}...")
-            
-            # Load vectors in batches
-            batch_data = []
-            for i in range(num_vectors):
-                vector = np.frombuffer(f.read(dim * 4), dtype=np.float32)
-                # Convert to list for pgvector (it accepts Python lists)
-                vector_list = vector.tolist()
-                batch_data.append((int(i), vector_list))
-                
-                # Insert batch when full
-                if len(batch_data) >= batch_size:
-                    with self.conn.cursor() as cur:
-                        # Use execute_values with proper vector casting
-                        execute_values(
-                            cur,
-                            f"INSERT INTO {self.table_name} (id, vector) VALUES %s",
-                            batch_data,
-                            template=f"(%s, %s::vector)"
-                        )
-                    batch_data = []
-                    print(f"Loaded {i + 1}/{num_vectors} vectors...", end='\r')
-            
-            # Insert remaining vectors
-            if batch_data:
+
+            payload = file_size - 8
+            elem_size = payload // (num_vectors * dim)
+            if elem_size == 1:
+                np_dtype = np.int8
+            elif elem_size == 4:
+                np_dtype = np.float32
+            else:
+                raise ValueError(
+                    f"Cannot infer DiskANN element size from {data_path}: "
+                    f"payload={payload} npts={num_vectors} dim={dim}"
+                )
+            print(f"Loading {num_vectors} vectors of dimension {dim} (source dtype={np_dtype.__name__})...")
+            with self.conn.cursor() as cur:
+                cur.execute("SET synchronous_commit TO OFF")
+
+            loaded = 0
+            remaining = num_vectors
+            while remaining > 0:
+                n = min(batch_size, remaining)
+                raw = np.fromfile(f, dtype=np_dtype, count=n * dim)
+                if raw.size != n * dim:
+                    raise ValueError(
+                        f"Truncated DiskANN payload in {data_path}: "
+                        f"expected {n * dim} elements, got {raw.size}"
+                    )
+                batch = np.ascontiguousarray(raw.reshape(n, dim), dtype=np.float32)
+                rows = [(int(loaded + j), batch[j].tolist()) for j in range(n)]
                 with self.conn.cursor() as cur:
                     execute_values(
                         cur,
                         f"INSERT INTO {self.table_name} (id, vector) VALUES %s",
-                        batch_data,
-                        template=f"(%s, %s::vector)"
+                        rows,
+                        template="(%s, %s::vector)",
+                        page_size=batch_size,
                     )
+                loaded += n
+                remaining -= n
+                print(f"Loaded {loaded}/{num_vectors} vectors...", end='\r')
             
             # Create HNSW index after data is loaded for optimal recall
             # HNSW generally provides better recall than IVFFlat
             ops = "vector_cosine_ops" if self.metric == "cosine" else "vector_l2_ops"
             print(f"Creating HNSW index (better recall than IVFFlat) using {ops}...")
             with self.conn.cursor() as cur:
-                # HNSW parameters: m=16 (connections per layer), ef_construction=64 (build quality)
-                # Higher ef_construction = better recall but slower build
+                # Aker paper HNSW: m=16, ef_construction=64
+                cur.execute("SET maintenance_work_mem = '8GB'")
+                cur.execute("SET max_parallel_maintenance_workers = 8")
                 cur.execute(f"""
                     CREATE INDEX ON {self.table_name} 
                     USING hnsw (vector {ops})

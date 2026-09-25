@@ -1,0 +1,73 @@
+# syntax=docker/dockerfile:1
+#
+# Base image that downloads and installs unmodified PostgreSQL 16.2 from the official
+# PostgreSQL source tarball.
+#
+# This matches the host-side manual install recipe you provided:
+#   wget https://ftp.postgresql.org/pub/source/v16.2/postgresql-16.2.tar.gz
+#   ./configure --with-openssl
+#   make -j world
+#   make install-world
+#
+
+FROM ubuntu:24.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Use bash for RUN steps so 'set -euo pipefail' works reliably.
+SHELL ["/bin/bash", "-c"]
+
+# NOTE: Keep dependencies explicit to make builds reproducible.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        bash \
+        ca-certificates \
+        build-essential \
+        bison \
+        flex \
+        git \
+        patch \
+        pkg-config \
+        wget \
+        xz-utils \
+        tar \
+        libreadline-dev \
+        zlib1g-dev \
+        libssl-dev \
+        libxml2-dev \
+        libxslt1-dev \
+        libicu-dev \
+        liblz4-dev \
+        libzstd-dev \
+        numactl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build and install unmodified PostgreSQL 16.2 from the official source tarball.
+ARG POSTGRESQL_VERSION=16.2
+ARG POSTGRESQL_PREFIX=/usr/local/pgsql
+
+RUN set -euo pipefail; \
+    mkdir -p /opt/src && \
+    cd /opt/src && \
+    wget -q "https://ftp.postgresql.org/pub/source/v${POSTGRESQL_VERSION}/postgresql-${POSTGRESQL_VERSION}.tar.gz" -O postgresql.tar.gz && \
+    tar -xzf postgresql.tar.gz && \
+    rm -f postgresql.tar.gz && \
+    cd "postgresql-${POSTGRESQL_VERSION}" && \
+    ./configure --with-openssl --prefix="${POSTGRESQL_PREFIX}" && \
+    make -j"$(nproc)" world && \
+    make install-world
+
+# Create a dedicated user for running PostgreSQL.
+RUN set -euo pipefail; \
+    groupadd -g 999 postgres || true; \
+    useradd -m -u 999 -g 999 -s /bin/bash postgres || true; \
+    mkdir -p /var/lib/postgresql && \
+    chown -R postgres:postgres /var/lib/postgresql
+
+ENV PATH="/usr/local/pgsql/bin:${PATH}"
+
+# Keep containers "idle" by default; benchmarks/scripts will start/stop via pg_ctl.
+COPY docker/entrypoint/idle.sh /usr/local/bin/aker_docker_idle.sh
+RUN chmod +x /usr/local/bin/aker_docker_idle.sh
+
+ENTRYPOINT ["/usr/local/bin/aker_docker_idle.sh"]

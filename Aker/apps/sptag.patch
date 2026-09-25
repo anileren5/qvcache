@@ -1,0 +1,611 @@
+diff --git a/AnnService/CMakeLists.txt b/AnnService/CMakeLists.txt
+index de5f588..696adb8 100644
+--- a/AnnService/CMakeLists.txt
++++ b/AnnService/CMakeLists.txt
+@@ -4,6 +4,17 @@
+ set(AnnService ${PROJECT_SOURCE_DIR}/AnnService)
+ set(Zstd ${PROJECT_SOURCE_DIR}/ThirdParty/zstd)
+ 
++#
++# Setting TopKache path
++find_library(TOPKACHE_LIB NAMES topkache PATHS ../../../build/lib)
++if (TOPKACHE_LIB)
++    message(STATUS "Found TopKache: ${TOPKACHE_LIB}")
++    include_directories(${PROJECT_SOURCE_DIR}/../../inc) 
++    # check the include include_directories
++else()
++    message(FATAL_ERROR "TopKache library not found!")
++endif()
++
+ include_directories(${AnnService})
+ include_directories(${Zstd}/lib)
+ 
+@@ -38,9 +49,9 @@ if(${CMAKE_CXX_COMPILER_ID} STREQUAL "GNU")
+ endif()
+ 
+ add_library (SPTAGLib SHARED ${SRC_FILES} ${HDR_FILES})
+-target_link_libraries (SPTAGLib DistanceUtils libzstd_shared ${NUMA_LIBRARY})
++target_link_libraries (SPTAGLib DistanceUtils libzstd_shared ${NUMA_LIBRARY} ${TOPKACHE_LIB})
+ add_library (SPTAGLibStatic STATIC ${SRC_FILES} ${HDR_FILES})
+-target_link_libraries (SPTAGLibStatic DistanceUtils libzstd_static ${NUMA_LIBRARY_STATIC})
++target_link_libraries (SPTAGLibStatic DistanceUtils libzstd_static ${NUMA_LIBRARY_STATIC} ${TOPKACHE_LIB})
+ if(${CMAKE_CXX_COMPILER_ID} STREQUAL "GNU")
+     target_compile_options(SPTAGLibStatic PRIVATE -fPIC)
+ endif()
+@@ -50,62 +61,66 @@ install(TARGETS SPTAGLib SPTAGLibStatic
+   ARCHIVE DESTINATION lib
+   LIBRARY DESTINATION lib)
+ 
+-if (NOT LIBRARYONLY)
+-    file(GLOB SERVER_HDR_FILES ${AnnService}/inc/Server/*.h ${AnnService}/inc/Socket/*.h)
+-    file(GLOB SERVER_FILES ${AnnService}/src/Server/*.cpp ${AnnService}/src/Socket/*.cpp)
+-    add_executable (server ${SERVER_FILES} ${SERVER_HDR_FILES})
+-    target_link_libraries(server ${Boost_LIBRARIES} SPTAGLibStatic)
+-
+-    file(GLOB CLIENT_HDR_FILES ${AnnService}/inc/Client/*.h ${AnnService}/inc/Socket/*.h)
+-    file(GLOB CLIENT_FILES ${AnnService}/src/Client/*.cpp ${AnnService}/src/Socket/*.cpp)
+-    add_executable (client ${CLIENT_FILES} ${CLIENT_HDR_FILES})
+-    target_link_libraries(client ${Boost_LIBRARIES} SPTAGLibStatic)
+-
+-    file(GLOB AGG_HDR_FILES ${AnnService}/inc/Aggregator/*.h ${AnnService}/inc/Socket/*.h ${AnnService}/inc/Server/QueryParser.h)
+-    file(GLOB AGG_FILES ${AnnService}/src/Aggregator/*.cpp ${AnnService}/src/Socket/*.cpp ${AnnService}/src/Server/QueryParser.cpp)
+-    add_executable (aggregator ${AGG_FILES} ${AGG_HDR_FILES})
+-    target_link_libraries(aggregator ${Boost_LIBRARIES} SPTAGLibStatic)
+-
+-    file(GLOB BUILDER_FILES ${AnnService}/src/IndexBuilder/*.cpp)
+-    add_executable (indexbuilder ${BUILDER_FILES})
+-    target_link_libraries(indexbuilder ${Boost_LIBRARIES} SPTAGLibStatic)
+-
+-    file(GLOB SEARCHER_FILES ${AnnService}/src/IndexSearcher/*.cpp)
+-    add_executable (indexsearcher ${SEARCHER_FILES})
+-    target_link_libraries(indexsearcher ${Boost_LIBRARIES} SPTAGLibStatic)
++# Disable the options for additionals
++# 
++# if (NOT LIBRARYONLY)
++#     file(GLOB SERVER_HDR_FILES ${AnnService}/inc/Server/*.h ${AnnService}/inc/Socket/*.h)
++#     file(GLOB SERVER_FILES ${AnnService}/src/Server/*.cpp ${AnnService}/src/Socket/*.cpp)
++#     add_executable (server ${SERVER_FILES} ${SERVER_HDR_FILES})
++#     target_link_libraries(server ${Boost_LIBRARIES} SPTAGLibStatic)
++
++#     file(GLOB CLIENT_HDR_FILES ${AnnService}/inc/Client/*.h ${AnnService}/inc/Socket/*.h)
++#     file(GLOB CLIENT_FILES ${AnnService}/src/Client/*.cpp ${AnnService}/src/Socket/*.cpp)
++#     add_executable (client ${CLIENT_FILES} ${CLIENT_HDR_FILES})
++#     target_link_libraries(client ${Boost_LIBRARIES} SPTAGLibStatic)
++
++#     file(GLOB AGG_HDR_FILES ${AnnService}/inc/Aggregator/*.h ${AnnService}/inc/Socket/*.h ${AnnService}/inc/Server/QueryParser.h)
++#     file(GLOB AGG_FILES ${AnnService}/src/Aggregator/*.cpp ${AnnService}/src/Socket/*.cpp ${AnnService}/src/Server/QueryParser.cpp)
++#     add_executable (aggregator ${AGG_FILES} ${AGG_HDR_FILES})
++#     target_link_libraries(aggregator ${Boost_LIBRARIES} SPTAGLibStatic)
++
++#     file(GLOB BUILDER_FILES ${AnnService}/src/IndexBuilder/*.cpp)
++#     add_executable (indexbuilder ${BUILDER_FILES})
++#     target_link_libraries(indexbuilder ${Boost_LIBRARIES} SPTAGLibStatic)
++
++#     file(GLOB SEARCHER_FILES ${AnnService}/src/IndexSearcher/*.cpp)
++#     add_executable (indexsearcher ${SEARCHER_FILES})
++#     target_link_libraries(indexsearcher ${Boost_LIBRARIES} SPTAGLibStatic)
+     
+-    file(GLOB QUANTIZER_HDR_FILES ${AnnService}/inc/Quantizer/*.h)
+-    file(GLOB QUANTIZER_FILES ${AnnService}/src/Quantizer/*.cpp)
+-    add_executable (quantizer ${QUANTIZER_FILES} ${QUANTIZER_HDR_FILES})
+-    target_link_libraries(quantizer ${Boost_LIBRARIES} SPTAGLibStatic)
+-
+-    install(TARGETS server client aggregator indexbuilder indexsearcher quantizer
+-      RUNTIME DESTINATION bin
+-      ARCHIVE DESTINATION lib
+-      LIBRARY DESTINATION lib)
+-endif()
++#     file(GLOB QUANTIZER_HDR_FILES ${AnnService}/inc/Quantizer/*.h)
++#     file(GLOB QUANTIZER_FILES ${AnnService}/src/Quantizer/*.cpp)
++#     add_executable (quantizer ${QUANTIZER_FILES} ${QUANTIZER_HDR_FILES})
++#     target_link_libraries(quantizer ${Boost_LIBRARIES} SPTAGLibStatic)
++
++#     install(TARGETS server client aggregator indexbuilder indexsearcher quantizer
++#       RUNTIME DESTINATION bin
++#       ARCHIVE DESTINATION lib
++#       LIBRARY DESTINATION lib)
++# endif()
+ 
+ file(GLOB_RECURSE SSD_SERVING_HDR_FILES ${AnnService}/inc/SSDServing/*.h)
+ file(GLOB_RECURSE SSD_SERVING_FILES ${AnnService}/src/SSDServing/*.cpp)
+ 
+ add_executable(ssdserving ${SSD_SERVING_HDR_FILES} ${SSD_SERVING_FILES})
+-target_link_libraries(ssdserving SPTAGLibStatic ${Boost_LIBRARIES})
++target_link_libraries(ssdserving SPTAGLibStatic ${Boost_LIBRARIES} ${TOPKACHE_LIB})
+ target_compile_definitions(ssdserving PRIVATE _exe)
+ 
+ # for Test
+ add_library(ssdservingLib ${SSD_SERVING_HDR_FILES} ${SSD_SERVING_FILES})
+ target_link_libraries(ssdservingLib SPTAGLibStatic ${Boost_LIBRARIES})
+ 
+-find_package(MPI)
+-if (MPI_FOUND)
+-    message (STATUS "Found MPI.")
+-    message (STATUS "MPI Include Path: ${MPI_CXX_INCLUDE_PATH}")
+-    message (STATUS "MPI Libraries: ${MPI_CXX_LIBRARIES}")
+-    include_directories (${MPI_CXX_INCLUDE_PATH})
+-    file(GLOB PARTITION_FILES ${AnnService}/src/BalancedDataPartition/*.cpp)
+-    add_executable(balanceddatapartition ${PARTITION_FILES})
+-    target_link_libraries(balanceddatapartition SPTAGLibStatic ${Boost_LIBRARIES} ${MPI_CXX_LIBRARIES})
+-endif()
++# Disable the options for additionals
++# 
++# find_package(MPI)
++# if (MPI_FOUND)
++#     message (STATUS "Found MPI.")
++#     message (STATUS "MPI Include Path: ${MPI_CXX_INCLUDE_PATH}")
++#     message (STATUS "MPI Libraries: ${MPI_CXX_LIBRARIES}")
++#     include_directories (${MPI_CXX_INCLUDE_PATH})
++#     file(GLOB PARTITION_FILES ${AnnService}/src/BalancedDataPartition/*.cpp)
++#     add_executable(balanceddatapartition ${PARTITION_FILES})
++#     target_link_libraries(balanceddatapartition SPTAGLibStatic ${Boost_LIBRARIES} ${MPI_CXX_LIBRARIES})
++# endif()
+ 
+ install(TARGETS ssdservingLib ssdserving
+   RUNTIME DESTINATION bin
+diff --git a/AnnService/inc/Core/VectorSet.h b/AnnService/inc/Core/VectorSet.h
+index 24eb7c2..56c94e9 100644
+--- a/AnnService/inc/Core/VectorSet.h
++++ b/AnnService/inc/Core/VectorSet.h
+@@ -68,7 +68,8 @@ public:
+ 
+     virtual void Normalize(int p_threads);
+ 
+-private:
++// Make it open for TopKache integration
++// private:
+     ByteArray m_data;
+ 
+     VectorValueType m_valueType;
+diff --git a/AnnService/inc/Helper/DiskIO.h b/AnnService/inc/Helper/DiskIO.h
+index 5a5a1ac..cdc1a47 100644
+--- a/AnnService/inc/Helper/DiskIO.h
++++ b/AnnService/inc/Helper/DiskIO.h
+@@ -8,6 +8,7 @@
+ #include <fstream>
+ #include <string.h>
+ #include <memory>
++#include <cstdint>
+ 
+ namespace SPTAG
+ {
+diff --git a/AnnService/inc/SSDServing/SSDIndex.h b/AnnService/inc/SSDServing/SSDIndex.h
+index d45685b..f242e6d 100644
+--- a/AnnService/inc/SSDServing/SSDIndex.h
++++ b/AnnService/inc/SSDServing/SSDIndex.h
+@@ -12,6 +12,66 @@
+ #include "inc/Helper/StringConvert.h"
+ #include "inc/SSDServing/Utils.h"
+ 
++/* 
++ * Add TopKache
++ */
++#include "Commons.hh"
++#include "utils/ParamParser.hh"
++#include "core/ResultCache2.hh"
++
++extern std::unique_ptr<topkache::ResultCache2> topkache_layer;
++extern topkache::result_cache_parameter_t topkache_parameter;
++
++SPTAG::BasicVectorSet* query_vectorset_handle;
++
++std::vector<std::uint64_t> hashed_queries;
++size_t per_vector_size;
++
++float
++topkache_convfunc(
++    topkache::vector_data_t* src, 
++    size_t src_size, 
++    std::uint32_t dim, 
++    float* dst, 
++    std::uint8_t* aux)
++{
++    std::uint8_t* src_array = (std::uint8_t*)src;   // This is binary, thus we convert it to float.
++    float* dst_array = (float*)dst;
++
++    // Element size
++    assert(src_size % dim == 0);
++
++    SPTAG::VectorValueType* value_type = (SPTAG::VectorValueType*)aux;
++    switch (*value_type)
++    {
++        case (SPTAG::VectorValueType::Int8):
++            {
++                for (int i = 0; i < dim; i++)
++                    dst_array[i] = (std::int8_t)src_array[i];
++            }
++            break;
++        case (SPTAG::VectorValueType::UInt8):
++            {
++                for (int i = 0; i < dim; i++)
++                    dst_array[i] = (std::uint8_t)src_array[i];
++            }
++            break;
++        // case (SPTAG::VectorValueType::Int16):
++        //     break;
++        case (SPTAG::VectorValueType::Float):
++            {
++                // It is the same size, thus we just do memcpy to dst
++                std::memcpy(dst_array, src_array, src_size);
++            }
++            break;
++        default:
++            assert(0);
++    }
++
++    return true;
++}
++
++
+ namespace SPTAG {
+ 	namespace SSDServing {
+ 		namespace SSDIndex {
+@@ -119,6 +179,39 @@ namespace SPTAG {
+                         NumaStrategy ns = (p_index->GetDiskIndex() != nullptr) ? NumaStrategy::SCATTER : NumaStrategy::LOCAL; // Only for SPANN, we need to avoid IO threads overlap with search threads.
+                         Helper::SetThreadAffinity(i, threads[i], ns, OrderStrategy::ASC); 
+ 
++#pragma region topkache-prepare
++
++                        std::int32_t skipped_counts = 0;
++        
++                        SPTAG::SPANN::Options& p_opts = *(p_index->GetOptions());
++                        VectorValueType value_type = p_opts.m_valueType;
++        
++                        struct ResultTemplate {
++                            std::int32_t        vid;
++                            float               dist;
++                        };
++        
++                        // Prepare data
++                        size_t vector_list_size = topkache_parameter.vector_list_size;
++                        struct ResultTemplate** vector_data_list 
++                            = new struct ResultTemplate*[vector_list_size];
++        
++                        for (int j = 0; j < vector_list_size; j++)
++                        {
++                            vector_data_list[j] = (new struct ResultTemplate);
++                            std::memset(vector_data_list[j], 0, sizeof(struct ResultTemplate));
++                        }
++        
++                        topkache::Vector2** vectors = new topkache::Vector2*[vector_list_size];
++                        for (int j = 0; j < p_internalResultNum; j++)
++                        {
++                            vectors[j] = new topkache::Vector2();                   // New vector
++                            vectors[j]->setVecData(
++                                (topkache::vector_data_t*)vector_data_list[j]);     // Set vector data
++                        }
++
++#pragma endregion
++
+                         Utils::StopW threadws;
+                         size_t index = 0;
+                         while (true)
+@@ -132,9 +225,168 @@ namespace SPTAG {
+                                 }
+ 
+                                 double startTime = threadws.getElapsedMs();
++
++#pragma region topkache-get             
++                            
++                                QueryResult& query_result = p_results[index];
++
++                                // 
++                                // First, we need to get the result from the topkache
++                                std::uint64_t hashed_query_id = hashed_queries[index];
++                                
++                                bool similar_entry = false;
++                                bool is_invalid = false;
++
++                                topkache::vector_data_t* raw_query_data = (topkache::vector_data_t*)query_result.GetTarget();
++
++                                // Change here from query vector to float_query
++                                topkache::float_qvec_t float_query = {
++                                    .vector_id = hashed_query_id,
++                                    .vector_data = raw_query_data,
++                                    .vector_dim = topkache_parameter.vector_dim,
++                                    .vector_data_size = topkache_parameter.vector_data_size,
++                                    .conversion_function = topkache_convfunc,
++                                    .aux = (std::uint8_t*)(&value_type)
++                                };
++
++                                topkache::result_cache_entry_t* found_entry 
++                                    = topkache_layer->simGetCEntry(
++                                        float_query, similar_entry, is_invalid, 
++                                        [&](topkache::vector_data_t* vector1, topkache::vector_data_t* vector2, size_t dimension) -> float {
++                                            float distance = 0;
++                                            
++                                            // Here, the first vector1 is the float_query.vector_data, thus we ignore the value.
++                                            // Second vector2 is the found data, thus we use the saved vector data.
++                                            distance = COMMON::DistanceUtils::ComputeDistance(
++                                                (const ValueType*)raw_query_data,
++                                                (const ValueType*)vector2,
++                                                (DimensionType)dimension,
++                                                DistCalcMethod::L2                      // We fix the method for now
++                                            );
++
++                                            return distance;
++                                        }
++                                );
++
++                                bool found = false;
++                                if (found_entry != nullptr) 
++                                {
++                                    for (int result_i = 0; result_i < p_internalResultNum; result_i++)
++                                    {
++                                        struct ResultTemplate* vector_data 
++                                            = (struct ResultTemplate*)(found_entry->vector_slot_ref_list[result_i]->getVecData());
++                                        query_result.SetResult(result_i, vector_data->vid, vector_data->dist);
++                                    }
++
++                                    // If the entry is similar one, we link it to the query result
++                                    if (similar_entry)
++                                    {
++                                        topkache::Vector2* query_vector = new topkache::Vector2(topkache_parameter.vector_data_size);
++
++                                        query_vector->setVecId(hashed_query_id);
++                                        query_vector->setVecVersion(0);
++
++                                        // We do not record the raw vector data in this case.
++                                        std::memcpy(
++                                            query_vector->getVecData(), 
++                                            query_vectorset_handle->GetVector(index),
++                                            topkache_parameter.vector_data_size
++                                        );
++
++                                        topkache::result_cache_entry_t* new_entry 
++                                            = topkache_layer->makeCEntry(query_vector, vector_list_size, nullptr);                                            
++
++                                        topkache_layer->linkCEntry(new_entry, found_entry->query_vector->getVecId());
++                                    }
++
++                                    // topkache_layer->releaseCEntry(found_entry);
++
++                                    topkache_layer->freeCEntry(found_entry);
++
++                                    // Count the result time
++                                    double endTime = threadws.getElapsedMs();
++                                    double exEndTime = threadws.getElapsedMs();
++
++                                    p_stats[index].m_exLatency = exEndTime - endTime;
++                                    p_stats[index].m_totalLatency = p_stats[index].m_totalSearchLatency = exEndTime - startTime;
++
++                                    skipped_counts++;
++                                    found = true;
++                                }
++
++                                topkache_layer->consumeAgedWLEntry(
++                                    [&](topkache::vector_data_t* vector1, topkache::vector_data_t* vector2, size_t dimension) -> float {
++                                        float distance = 0;
++                                        
++                                        // Here, the first vector1 is the float_query.vector_data, thus we ignore the value.
++                                        // Second vector2 is the found data, thus we use the saved vector data.
++                                        distance = COMMON::DistanceUtils::ComputeDistance(
++                                            (const ValueType*)raw_query_data,
++                                            (const ValueType*)vector2,
++                                            (DimensionType)dimension,
++                                            DistCalcMethod::L2                      // We fix the method for now
++                                        );
++
++                                        return distance;
++                                    }
++                                );
++
++                                if (found)
++                                    continue;
++
++#pragma endregion
++
+                                 p_index->GetMemoryIndex()->SearchIndex(p_results[index]);
+                                 double endTime = threadws.getElapsedMs();
+                                 p_index->SearchDiskIndex(p_results[index], &(p_stats[index]));
++
++#pragma region topkache-mgmt
++
++                                // 
++                                // It is time to add the result to the topkache_layer
++                                for (int result_i = 0; result_i < vector_list_size; result_i++)
++                                {
++                                    size_t id = p_results[index].GetResult(result_i)->VID;
++                                    vector_data_list[result_i]->vid = p_results[index].GetResult(result_i)->VID;      // Set VID
++                                    vector_data_list[result_i]->dist = p_results[index].GetResult(result_i)->Dist;    // Set distance
++
++                                    vectors[result_i]->setVecId(p_results[index].GetResult(result_i)->VID);
++                                    vectors[result_i]->setVecVersion(0);
++
++                                    vectors[result_i]->setDistance(p_results[index].GetResult(result_i)->Dist);
++                                }
++
++                                topkache::Vector2* query_vector = new topkache::Vector2(topkache_parameter.vector_data_size);
++                                
++                                query_vector->setVecId(hashed_queries[index]);
++                                query_vector->setVecVersion(0);
++
++                                raw_query_data = (topkache::vector_data_t*)query_result.GetTarget();
++                                std::memcpy(query_vector->getVecData(), raw_query_data, topkache_parameter.vector_data_size);
++
++                                // Change here from query vector to float_query
++                                float_query = {
++                                    .vector_id = query_vector->getVecId(),
++                                    .vector_data = query_vector->getVecData(),
++                                    .vector_dim = topkache_parameter.vector_dim,
++                                    .vector_data_size = topkache_parameter.vector_data_size,
++                                    .conversion_function = topkache_convfunc,
++                                    .aux = (std::uint8_t*)(&value_type)
++                                };
++
++                                topkache::result_cache_entry_t* new_entry = topkache_layer->makeCEntry(
++                                    query_vector, vector_list_size, vectors
++                                );
++
++                                new_entry->min_distance = vector_data_list[0]->dist;
++                                new_entry->max_distance = vector_data_list[vector_list_size - 1]->dist;
++
++                                bool insert_success = topkache_layer->insertCEntry2(
++                                    query_vector->getVecId(), new_entry, float_query 
++                                );
++
++#pragma endregion                                
++
+                                 double exEndTime = threadws.getElapsedMs();
+ 
+                                 p_stats[index].m_exLatency = exEndTime - endTime;
+@@ -145,6 +397,17 @@ namespace SPTAG {
+                                 return;
+                             }
+                         }
++
++                        for (int j = 0; j < p_internalResultNum; j++)
++                            delete vectors[j];
++                        
++                        delete vectors;
++
++                        for (int j = 0; j < vector_list_size; j++)
++                            delete vector_data_list[j];
++
++                        delete vector_data_list;
++
+                     });
+                 }
+                 for (auto& thread : threads) { thread.join(); }
+@@ -219,6 +482,10 @@ namespace SPTAG {
+                 auto querySet = queryReader->GetVectorSet();
+                 int numQueries = querySet->Count();
+ 
++                // 
++                // Register for global vectorSet
++                query_vectorset_handle = (BasicVectorSet*)querySet.get();
++
+                 std::vector<QueryResult> results(numQueries, QueryResult(NULL, max(K, internalResultNum), false));
+                 std::vector<SPANN::SearchStats> stats(numQueries);
+                 for (int i = 0; i < numQueries; ++i)
+@@ -227,6 +494,26 @@ namespace SPTAG {
+                     results[i].Reset();
+                 }
+ 
++#pragma region topkache-hashed
++
++                std::int32_t dim = query_vectorset_handle->m_dimension;
++                per_vector_size = query_vectorset_handle->m_perVectorDataSize;
++
++                std::hash<std::string> hasher;
++                std::map<size_t, size_t> hashed_query_counts;
++
++                // Checks
++                for (int i = 0; i < numQueries; i++)
++                {
++                    std::string to_hash_querystr = std::string(
++                        (char*)query_vectorset_handle->GetVector(i), per_vector_size);
++
++                    size_t hashed = hasher(to_hash_querystr);
++                    hashed_queries.push_back(hashed);
++                }
++
++#pragma endregion
++
+ 
+                 SPTAGLIB_LOG(Helper::LogLevel::LL_Info, "Start ANN Search...\n");
+ 
+diff --git a/AnnService/src/SSDServing/main.cpp b/AnnService/src/SSDServing/main.cpp
+index 0244ad1..15c05a3 100644
+--- a/AnnService/src/SSDServing/main.cpp
++++ b/AnnService/src/SSDServing/main.cpp
+@@ -14,7 +14,17 @@
+ #include "inc/SSDServing/main.h"
+ #include "inc/SSDServing/Utils.h"
+ #include "inc/SSDServing/SSDIndex.h"
+- 
++
++/* 
++ * Add TopKache
++ */
++#include "Commons.hh"
++#include "utils/ParamParser.hh"
++#include "core/ResultCache2.hh"
++
++std::unique_ptr<topkache::ResultCache2> topkache_layer;
++topkache::result_cache_parameter_t topkache_parameter;
++
+ using namespace SPTAG;
+ 
+ namespace SPTAG {
+@@ -182,7 +192,7 @@ namespace SPTAG {
+ #ifdef _exe
+ 
+ int main(int argc, char* argv[]) {
+-	if (argc < 2)
++	if (argc < 3)
+ 	{
+ 		SPTAGLIB_LOG(Helper::LogLevel::LL_Error,
+ 			"ssdserving configFilePath\n");
+@@ -190,6 +200,21 @@ int main(int argc, char* argv[]) {
+ 	}
+ 
+ 	std::map<std::string, std::map<std::string, std::string>> my_map;
++
++	/* Add TopKache layer
++	 */
++	{
++		std::string parameter_path = argv[2];
++
++		topkache::ParameterParser parser(parameter_path);
++		topkache_parameter = parser.getParameter();
++
++		topkache_layer.reset(new topkache::ResultCache2(topkache_parameter));
++
++		SPTAGLIB_LOG(Helper::LogLevel::LL_Info, 
++			"TopKache layer initialized, using {}\n", parameter_path.c_str());
++	}
++
+ 	auto ret = SSDServing::BootProgram(false, &my_map, argv[1]);
+ 	return ret;
+ }
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index d6da2a8..d380915 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -23,11 +23,11 @@ if(${CMAKE_CXX_COMPILER_ID} STREQUAL "GNU")
+     if (CXX_COMPILER_VERSION VERSION_LESS 5.0)
+         message(FATAL_ERROR "GCC version must be at least 5.0!")
+     endif()
+-    set (CMAKE_CXX_FLAGS "-Wall -Wunreachable-code -Wno-reorder -Wno-delete-non-virtual-dtor -Wno-sign-compare -Wno-unknown-pragmas -Wcast-align -lm -lrt -std=c++14 -fopenmp")
++    set (CMAKE_CXX_FLAGS "-w -Wunreachable-code -Wno-reorder -Wno-delete-non-virtual-dtor -Wno-sign-compare -Wno-unknown-pragmas -Wcast-align -lm -lrt -std=c++14 -fopenmp -ggdb")
++    # set (CMAKE_CXX_FLAGS "-Wall -Wunreachable-code -Wno-reorder -Wno-delete-non-virtual-dtor -Wno-sign-compare -Wno-unknown-pragmas -Wcast-align -lm -lrt -std=c++14 -fopenmp")
+     set (CMAKE_CXX_FLAGS_RELEASE "-DNDEBUG -O3 -march=native")
+     set (CMAKE_CXX_FLAGS_DEBUG   "-g -DDEBUG")
+ 
+-
+     find_path(NUMA_INCLUDE_DIR NAME numa.h
+       HINTS $ENV{HOME}/local/include /opt/local/include /usr/local/include /usr/include)
+   
+@@ -103,7 +103,11 @@ else()
+     message (FATAL_ERROR "Could no find openmp!")
+ endif()
+ 
+-find_package(Boost 1.66 COMPONENTS system thread serialization wserialization regex filesystem)
++set(BOOST_ROOT "/opt/boost_1_86")
++set(Boost_INCLUDE_DIR "/opt/boost_1_86/include")
++set(Boost_LIBRARY_DIR "/opt/boost_1_86/lib")
++
++find_package(Boost 1.66 COMPONENTS system thread serialization wserialization regex filesystem program_options)
+ if (Boost_FOUND)
+     include_directories (${Boost_INCLUDE_DIR})
+     link_directories (${Boost_LIBRARY_DIR})
+@@ -115,12 +119,14 @@ else()
+     message (FATAL_ERROR "Could not find Boost >= 1.67!")
+ endif()
+ 
+-option(GPU "GPU" ON)
++# Disabled GPU support for blanc
++option(GPU "GPU" OFF)
+ option(LIBRARYONLY "LIBRARYONLY" OFF)
+ 
+ add_subdirectory (ThirdParty/zstd/build/cmake)
+ 
++# Disabled unnecessaries
+ add_subdirectory (AnnService)
+-add_subdirectory (Test)
+-add_subdirectory (GPUSupport)
+-add_subdirectory (Wrappers)
++# add_subdirectory (Test)
++# add_subdirectory (GPUSupport)
++# add_subdirectory (Wrappers)

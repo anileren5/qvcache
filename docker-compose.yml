@@ -4,6 +4,7 @@ services:
     image: qvcache:latest
     build: .
     volumes:
+      # Aker: the Aker tree is included via this bind mount at /app/Aker
       - .:/app
       - qdrant_storage:/qdrant/storage
     working_dir: /app
@@ -54,6 +55,8 @@ services:
     image: pgvector/pgvector:pg16
     ports:
       - "7000:5432"  # Use 7000 on host to avoid conflict with local PostgreSQL
+    # HNSW builds set maintenance_work_mem=8GB; default /dev/shm is 64MB.
+    shm_size: 16gb
     environment:
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=postgres

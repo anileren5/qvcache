@@ -1,0 +1,107 @@
+# syntax=docker/dockerfile:1
+#
+# Aker-integrated images:
+# - PostgreSQL 16.2 (from the base image)
+# - FAISS (required by Aker build)
+# - Aker (TopKcache) built in one of three modes: standard / potluck / proximity
+# - pgvector built from apps/pgvector, patched via apps/pgvector/pgvector.patch
+#
+# NOTE: This Dockerfile intentionally keeps PostgreSQL unmodified.
+#
+
+ARG BASE_IMAGE=aker_pg16_base:16
+FROM ${BASE_IMAGE}
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Use bash for RUN steps so 'set -euo pipefail' works reliably.
+SHELL ["/bin/bash", "-c"]
+
+# Build dependencies for Aker and FAISS.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        cmake \
+        git \
+        ninja-build \
+        patch \
+        python3 \
+        libboost-all-dev \
+        libopenblas-dev \
+        libgflags-dev \
+        gfortran \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build and install FAISS (CPU only).
+ARG FAISS_REPO_URL=https://github.com/facebookresearch/faiss.git
+ARG FAISS_REF=
+RUN set -euo pipefail; \
+    git clone --recursive "${FAISS_REPO_URL}" /opt/src/faiss && \
+    cd /opt/src/faiss && \
+    if [ -n "${FAISS_REF}" ]; then \
+        git checkout -f "${FAISS_REF}"; \
+        git submodule update --init --recursive; \
+    fi && \
+    cmake -B build . \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DFAISS_ENABLE_GPU=OFF \
+        -DFAISS_ENABLE_PYTHON=OFF \
+        -DFAISS_ENABLE_CUVS=OFF \
+        -DBUILD_SHARED_LIBS=ON \
+        -DFAISS_ENABLE_C_API=ON \
+        -DFAISS_ENABLE_MKL=OFF && \
+    make -C build -j"$(nproc)" faiss && \
+    make -C build -j"$(nproc)" faiss_avx2 && \
+    make -C build -j"$(nproc)" faiss_avx512 && \
+    make -C build install && \
+    ldconfig
+
+# Build and install Aker (TopKcache).
+ARG AKER_MODE=standard
+ARG AKER_SRC_DIR=/opt/src/aker
+ARG AKER_REPO_URL=https://github.com/sjoon-oh/Aker.git
+ARG AKER_REF=release
+
+RUN set -euo pipefail; \
+    git clone "${AKER_REPO_URL}" "${AKER_SRC_DIR}" && \
+    cd "${AKER_SRC_DIR}" && \
+    git checkout -f "${AKER_REF}" && \
+    git submodule update --init --recursive && \
+    mode_flags=""; \
+    case "${AKER_MODE}" in \
+        standard) \
+            mode_flags="-DAKER_ENABLE_PROXIMITY_MODE=OFF -DAKER_ENABLE_POTLUCK_MODE=OFF"; \
+            ;; \
+        potluck) \
+            mode_flags="-DAKER_ENABLE_PROXIMITY_MODE=OFF -DAKER_ENABLE_POTLUCK_MODE=ON"; \
+            ;; \
+        proximity) \
+            mode_flags="-DAKER_ENABLE_PROXIMITY_MODE=ON -DAKER_ENABLE_POTLUCK_MODE=OFF"; \
+            ;; \
+        *) \
+            echo "ERROR: unknown AKER_MODE=${AKER_MODE} (expected: standard|potluck|proximity)"; \
+            exit 1; \
+            ;; \
+    esac; \
+    cmake -S "${AKER_SRC_DIR}" -B "${AKER_SRC_DIR}/build" -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        ${mode_flags} && \
+    cmake --build "${AKER_SRC_DIR}/build" -j"$(nproc)" && \
+    cmake --install "${AKER_SRC_DIR}/build" && \
+    ldconfig
+
+# Build and install patched pgvector.
+ARG PGVECTOR_DIR=/opt/src/pgvector
+ARG PG_CONFIG=/usr/local/pgsql/bin/pg_config
+
+RUN set -euo pipefail; \
+    git clone --branch v0.8.0 --depth 1 https://github.com/pgvector/pgvector.git "${PGVECTOR_DIR}" && \
+    cd "${PGVECTOR_DIR}" && \
+    if [ ! -f "${AKER_SRC_DIR}/apps/pgvector/pgvector.patch" ]; then \
+        echo "ERROR: apps/pgvector/pgvector.patch is missing in the cloned Aker repository."; \
+        exit 1; \
+    fi && \
+    patch -p1 -l < "${AKER_SRC_DIR}/apps/pgvector/pgvector.patch" && \
+    make -j"$(nproc)" PG_CONFIG="${PG_CONFIG}" && \
+    make PG_CONFIG="${PG_CONFIG}" install

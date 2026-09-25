@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 # Script to build pgvector index from binary data files
 
@@ -8,30 +9,33 @@ cd "$(dirname "$0")/../../.." || exit 1
 # ============================================================================
 # DATASET CONFIGURATION
 # ============================================================================
-DATASET="siftsmall"
-DATA_PATH="data/$DATASET/${DATASET}_base.bin"
+# SPACEV-10M DiskANN bin (int8). Table name cannot contain '-'.
+DATASET="${DATASET:-spacev-10m}"
+DATA_PATH="${DATA_PATH:-data/$DATASET/${DATASET}_base.bin}"
 
 # ============================================================================
-# POSTGRESQL CONFIGURATION - UPDATE THESE VALUES FOR YOUR SETUP
+# POSTGRESQL CONFIGURATION
 # ============================================================================
-# PostgreSQL connection settings
-# For Docker: Use service name "postgres" and default credentials
-# For local: Use "localhost" and your PostgreSQL credentials
-DB_HOST="${DB_HOST:-localhost}"  # Default: localhost (use "postgres" for Docker)
-DB_PORT="${DB_PORT:-5432}"       # Default PostgreSQL port
-DB_NAME="${DB_NAME:-postgres}"   # Default database name
-DB_USER="${DB_USER:-postgres}"   # Default user
-DB_PASSWORD="${DB_PASSWORD:-postgres}"  # Default password
+# Host: from the qvcache container use service name "postgres" (auto-detected).
+# From the host machine: DB_HOST=localhost DB_PORT=7000 (compose maps 7000->5432).
+DB_HOST="${DB_HOST:-localhost}"
+DB_PORT="${DB_PORT:-7000}"
+DB_NAME="${DB_NAME:-postgres}"
+DB_USER="${DB_USER:-postgres}"
+DB_PASSWORD="${DB_PASSWORD:-postgres}"
 
-# Table name is derived from dataset name
-TABLE_NAME="vectors"
+TABLE_NAME="${TABLE_NAME:-spacev_10m}"
 
 # Distance metric for the index (l2 or cosine)
 METRIC="l2"  # Default: l2 
 
 # Detect if running inside Docker and set PostgreSQL host accordingly
 if [ -f /.dockerenv ] || [ -n "$DOCKER_CONTAINER" ]; then
-    DB_HOST="postgres"  # Docker internal network
+    DB_HOST="postgres"
+    # Compose maps host 7000 -> container 5432; inside the network use 5432.
+    if [ "$DB_PORT" = "7000" ]; then
+        DB_PORT="5432"
+    fi
 fi
 
 # Options
@@ -49,7 +53,7 @@ if [ -d "venv" ]; then
 fi
 
 # Add python directory to PYTHONPATH
-export PYTHONPATH="${PYTHONPATH}:$(pwd)/python"
+export PYTHONPATH="${PYTHONPATH:-}:$(pwd)/python"
 
 # Build pgvector index
 echo "Building pgvector index..."

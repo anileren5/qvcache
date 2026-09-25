@@ -1,0 +1,101 @@
+# syntax=docker/dockerfile:1
+#
+# Minimal Aker test image:
+# - Builds and installs FAISS (CPU)
+# - Builds and installs libaker.so + aker-random-cache-test
+# - Includes bootstrap configs for local smoke testing
+#
+
+FROM ubuntu:24.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Use bash for RUN steps so 'set -euo pipefail' works reliably.
+SHELL ["/bin/bash", "-c"]
+
+# Build dependencies for Aker and FAISS.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        bash \
+        ca-certificates \
+        build-essential \
+        cmake \
+        ninja-build \
+        pkg-config \
+        git \
+        patch \
+        python3 \
+        libboost-all-dev \
+        libopenblas-dev \
+        libgflags-dev \
+        gfortran \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build and install FAISS (CPU only).
+ARG FAISS_REPO_URL=https://github.com/facebookresearch/faiss.git
+ARG FAISS_REF=
+RUN set -euo pipefail; \
+    git clone --recursive "${FAISS_REPO_URL}" /opt/src/faiss && \
+    cd /opt/src/faiss && \
+    if [ -n "${FAISS_REF}" ]; then \
+        git checkout -f "${FAISS_REF}"; \
+        git submodule update --init --recursive; \
+    fi && \
+    cmake -B build . \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DFAISS_ENABLE_GPU=OFF \
+        -DFAISS_ENABLE_PYTHON=OFF \
+        -DFAISS_ENABLE_CUVS=OFF \
+        -DBUILD_SHARED_LIBS=ON \
+        -DFAISS_ENABLE_C_API=ON \
+        -DFAISS_ENABLE_MKL=OFF && \
+    make -C build -j"$(nproc)" faiss && \
+    make -C build -j"$(nproc)" faiss_avx2 && \
+    make -C build -j"$(nproc)" faiss_avx512 && \
+    make -C build install && \
+    ldconfig
+
+# Clone the Aker source tree (includes required extern/* submodules).
+ARG AKER_SRC_DIR=/opt/src/aker
+ARG AKER_REPO_URL=https://github.com/sjoon-oh/Aker.git
+ARG AKER_REF=release
+
+RUN set -euo pipefail; \
+    git clone "${AKER_REPO_URL}" "${AKER_SRC_DIR}" && \
+    cd "${AKER_SRC_DIR}" && \
+    git checkout -f "${AKER_REF}" && \
+    git submodule update --init --recursive
+
+# Build and install Aker + test binary.
+ARG AKER_MODE=standard
+RUN set -euo pipefail; \
+    mode_flags=""; \
+    case "${AKER_MODE}" in \
+        standard) \
+            mode_flags="-DAKER_ENABLE_PROXIMITY_MODE=OFF -DAKER_ENABLE_POTLUCK_MODE=OFF"; \
+            ;; \
+        potluck) \
+            mode_flags="-DAKER_ENABLE_PROXIMITY_MODE=OFF -DAKER_ENABLE_POTLUCK_MODE=ON"; \
+            ;; \
+        proximity) \
+            mode_flags="-DAKER_ENABLE_PROXIMITY_MODE=ON -DAKER_ENABLE_POTLUCK_MODE=OFF"; \
+            ;; \
+        *) \
+            echo "ERROR: unknown AKER_MODE=${AKER_MODE} (expected: standard|potluck|proximity)"; \
+            exit 1; \
+            ;; \
+    esac; \
+    cmake -S "${AKER_SRC_DIR}" -B "${AKER_SRC_DIR}/build" -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        ${mode_flags} && \
+    cmake --build "${AKER_SRC_DIR}/build" -j"$(nproc)" && \
+    cmake --install "${AKER_SRC_DIR}/build" && \
+    ldconfig
+
+WORKDIR /opt/src/aker
+ENV AKER_CONFIG_PATH=/opt/src/aker/bootstrap/aker-standard.ini
+
+# Default command runs the smoke test. Override with `docker run ... <args>`.
+CMD ["/usr/local/bin/aker-random-cache-test"]

@@ -1,0 +1,13 @@
+{
+  "dimension": 128,
+  "vector_in_bytes": 512,
+  "pool_size": 1000000,
+  "in_topk": 10,
+  "top_delta": 5,
+  "global_thresh": 0.0,
+  "dropout": 0.0,
+  "risk_thresh": 0.35,
+  "alpha_tighten": 0.9,
+  "alpha_loosen": 1.1,
+  "distance_metric": "l2"
+}

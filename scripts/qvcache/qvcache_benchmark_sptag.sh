@@ -43,6 +43,7 @@ P=0.90
 DEVIATION_FACTOR=0.075
 SECTOR_LEN=4096
 USE_REGIONAL_THETA=1 # Set to 0 to use global theta instead of regional theta
+LEARN_PCA_FROM_QUERIES="${LEARN_PCA_FROM_QUERIES:-0}"
 PCA_DIM=16 # Set to desired PCA dimension (e.g., 16)
 BUCKETS_PER_DIM=8 # Set to desired number of buckets per PCA dimension (e.g., 4)
 MEMORY_INDEX_MAX_POINTS=60000 # Set to desired max points for memory index
@@ -61,9 +62,9 @@ SPTAG_SERVER_PORT="${SPTAG_SERVER_PORT:-8000}"
 VECTOR_DIM=0  # 0 to auto-detect from data_path
 
 # Validate window parameters
-MIN_SPLIT_REPEAT=$(( (WINDOW_SIZE / STRIDE) * N_REPEAT * N_ROUND ))
+MIN_SPLIT_REPEAT=$(( 1 + (WINDOW_SIZE / STRIDE) * N_REPEAT * N_ROUND ))
 if [ "$N_SPLIT_REPEAT" -lt "$MIN_SPLIT_REPEAT" ]; then
-    echo "Error: n_split_repeat ($N_SPLIT_REPEAT) must be >= (window_size / stride) * n_repeat * n_round = $MIN_SPLIT_REPEAT"
+    echo "Error: n_split_repeat ($N_SPLIT_REPEAT) must be >= 1 + (window_size / stride) * n_repeat * n_round = $MIN_SPLIT_REPEAT"
     exit 1
 fi
 
@@ -113,6 +114,7 @@ echo ""
   --deviation_factor "$DEVIATION_FACTOR" \
   --sector_len "$SECTOR_LEN" \
   --use_regional_theta "$USE_REGIONAL_THETA" \
+  --learn_pca_from_queries "$LEARN_PCA_FROM_QUERIES" \
   --pca_dim "$PCA_DIM" \
   --buckets_per_dim "$BUCKETS_PER_DIM" \
   --memory_index_max_points "$MEMORY_INDEX_MAX_POINTS" \

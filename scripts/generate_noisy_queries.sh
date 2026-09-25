@@ -9,14 +9,14 @@ set -e
 cd "$(dirname "$0")/.." || exit 1
 
 # Default values (can be overridden by command-line arguments)
-DATASET="siftsmall"
+DATASET="spacev-small-test"
 N_SPLIT="10"
 N_SPLIT_REPEAT="20"
 NOISE_RATIO="0.01"
 RANDOM_SEED="42"
 DATA_DIR="data"
-DATA_TYPE="float"
-K="100"
+DATA_TYPE="int8"
+K="10"
 METRIC="l2"
 
 # Parse arguments (optional - if provided, override defaults)

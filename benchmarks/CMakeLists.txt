@@ -39,9 +39,106 @@ foreach(i RANGE 0 ${max_index} 2)
     )
 endforeach()
 
+# Aker: DiskANN benchmark that uses libaker.so as the result cache
+set(AKER_ROOT "${PROJECT_SOURCE_DIR}/Aker")
+find_library(AKER_LIBRARY
+    NAMES aker
+    PATHS "${AKER_ROOT}/build/lib" /usr/local/lib
+)
+if(AKER_LIBRARY AND EXISTS "${AKER_ROOT}/inc/ak_anns_cache_c_wrapper.h")
+    add_executable(aker_benchmark_diskann aker/aker_benchmark_diskann.cpp)
+    add_executable(aker_approx_hit_probe aker/aker_approx_hit_probe.cpp)
+    foreach(_aker_exe aker_benchmark_diskann aker_approx_hit_probe)
+        target_link_libraries(${_aker_exe}
+            PRIVATE
+                greator
+                diskann
+                ${AKER_LIBRARY}
+                TBB::tbb
+                OpenMP::OpenMP_CXX
+                Boost::program_options
+                spdlog::spdlog
+        )
+        target_include_directories(${_aker_exe}
+            PRIVATE
+                ${PROJECT_SOURCE_DIR}/include
+                ${PROJECT_SOURCE_DIR}/backends
+                ${PROJECT_SOURCE_DIR}/backends/Greator/include
+                ${PROJECT_SOURCE_DIR}/external/DiskANN/include
+                ${AKER_ROOT}/inc
+                ${PROJECT_SOURCE_DIR}/benchmarks/aker
+        )
+        # Aker: libaker.so has no RPATH; keep the build-tree and install dirs on the loader path
+        set_target_properties(${_aker_exe} PROPERTIES
+            BUILD_RPATH "${AKER_ROOT}/build/lib;/usr/local/lib;/opt/boost_1_86/lib"
+            INSTALL_RPATH "${AKER_ROOT}/build/lib;/usr/local/lib;/opt/boost_1_86/lib"
+        )
+    endforeach()
+    message(STATUS "Aker: building aker_benchmark_diskann aker_approx_hit_probe against ${AKER_LIBRARY}")
+else()
+    message(STATUS "Aker: skipping aker_benchmark_diskann (build Aker with scripts/aker/build.sh first)")
+endif()
+
 # Find Boost components needed for SPTAG client (if not already found)
 if(NOT TARGET Boost::system)
     find_package(Boost COMPONENTS system thread serialization filesystem QUIET)
+endif()
+
+# Native C++ QVCache + pgvector (libpq) search-workload
+find_package(PostgreSQL)
+if(PostgreSQL_FOUND)
+    add_executable(qvcache_benchmark_pgvector qvcache/qvcache_benchmark_pgvector.cpp)
+    target_link_libraries(qvcache_benchmark_pgvector
+        PRIVATE
+            greator
+            diskann
+            qvcache
+            TBB::tbb
+            OpenMP::OpenMP_CXX
+            Boost::program_options
+            spdlog::spdlog
+            PostgreSQL::PostgreSQL
+    )
+    target_include_directories(qvcache_benchmark_pgvector
+        PRIVATE
+            ${PROJECT_SOURCE_DIR}/include
+            ${PROJECT_SOURCE_DIR}/backends
+            ${PROJECT_SOURCE_DIR}/backends/Greator/include
+            ${PROJECT_SOURCE_DIR}/external/DiskANN/include
+            ${PostgreSQL_INCLUDE_DIRS}
+    )
+    message(STATUS "Building qvcache_benchmark_pgvector against ${PostgreSQL_LIBRARIES}")
+    if(AKER_LIBRARY AND EXISTS "${AKER_ROOT}/inc/ak_anns_cache_c_wrapper.h")
+        add_executable(aker_benchmark_pgvector aker/aker_benchmark_pgvector.cpp)
+        target_link_libraries(aker_benchmark_pgvector
+            PRIVATE
+                greator
+                diskann
+                ${AKER_LIBRARY}
+                TBB::tbb
+                OpenMP::OpenMP_CXX
+                Boost::program_options
+                spdlog::spdlog
+                PostgreSQL::PostgreSQL
+        )
+        target_include_directories(aker_benchmark_pgvector
+            PRIVATE
+                ${PROJECT_SOURCE_DIR}/include
+                ${PROJECT_SOURCE_DIR}/backends
+                ${PROJECT_SOURCE_DIR}/backends/Greator/include
+                ${PROJECT_SOURCE_DIR}/external/DiskANN/include
+                ${AKER_ROOT}/inc
+                ${PROJECT_SOURCE_DIR}/benchmarks/aker
+                ${PostgreSQL_INCLUDE_DIRS}
+        )
+        set_target_properties(aker_benchmark_pgvector PROPERTIES
+            BUILD_RPATH "${AKER_ROOT}/build/lib;/usr/local/lib;/opt/boost_1_86/lib"
+            INSTALL_RPATH "${AKER_ROOT}/build/lib;/usr/local/lib;/opt/boost_1_86/lib"
+        )
+        message(STATUS "Aker: building aker_benchmark_pgvector against ${AKER_LIBRARY} + libpq")
+    endif()
+else()
+    message(STATUS "PostgreSQL/libpq not found; skipping qvcache_benchmark_pgvector")
 endif()
 
 # Special handling for qvcache_benchmark_sptag

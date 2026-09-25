@@ -34,6 +34,8 @@ Greator/data
 Greator/index
 Greator/results
 
+Aker/pgvector-bench/dataset/
+
 results/
 index/
 data/

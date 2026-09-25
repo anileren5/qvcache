@@ -1,0 +1,1545 @@
+diff --git a/Makefile b/Makefile
+index 7a4b88c..3b10d8f 100644
+--- a/Makefile
++++ b/Makefile
+@@ -4,8 +4,18 @@ EXTVERSION = 0.8.0
+ MODULE_big = vector
+ DATA = $(wildcard sql/*--*--*.sql)
+ DATA_built = sql/$(EXTENSION)--$(EXTVERSION).sql
+-OBJS = src/bitutils.o src/bitvec.o src/halfutils.o src/halfvec.o src/hnsw.o src/hnswbuild.o src/hnswinsert.o src/hnswscan.o src/hnswutils.o src/hnswvacuum.o src/ivfbuild.o src/ivfflat.o src/ivfinsert.o src/ivfkmeans.o src/ivfscan.o src/ivfutils.o src/ivfvacuum.o src/sparsevec.o src/vector.o
+-HEADERS = src/halfvec.h src/sparsevec.h src/vector.h
++OBJS = src/bitutils.o src/bitvec.o src/halfutils.o src/halfvec.o src/hnsw.o src/hnswbuild.o src/hnswinsert.o src/hnswscan.o src/hnswutils.o src/hnswvacuum.o src/ivfbuild.o src/ivfflat.o src/ivfinsert.o src/ivfkmeans.o src/ivfscan.o src/ivfutils.o src/ivfvacuum.o src/sparsevec.o src/vector.o src/ak_pgvector.o
++HEADERS = src/halfvec.h src/sparsevec.h src/vector.h src/ak_pgvector.h
++
++# Aker integration (pgvector 0.8.0)
++# - The Aker C ABI header is expected to be available on the include path.
++#   In the refactored snapshot docker images, Aker is installed under /usr/local.
++PG_CPPFLAGS += -I/usr/local/include
++
++# Aker library link
++# NOTE: The library name may vary depending on the Aker build configuration.
++#       Adjust `-laker` if your install produces a different name.
++SHLIB_LINK += -L/usr/local/lib -laker -lpthread -lfaiss -lboost_program_options -lstdc++
+ 
+ TESTS = $(wildcard test/sql/*.sql)
+ REGRESS = $(patsubst test/sql/%.sql,%,$(TESTS))
+diff --git a/sql/vector.sql b/sql/vector.sql
+index 7fc3671..62b703d 100644
+--- a/sql/vector.sql
++++ b/sql/vector.sql
+@@ -20,6 +20,14 @@ CREATE FUNCTION vector_recv(internal, oid, integer) RETURNS vector
+ CREATE FUNCTION vector_send(vector) RETURNS bytea
+ 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+ 
++-- Aker integration (used by stress workloads)
++
++CREATE FUNCTION aker_mark_del_trigger() RETURNS trigger
++	AS 'MODULE_PATHNAME', 'aker_mark_del_trigger' LANGUAGE C VOLATILE PARALLEL UNSAFE;
++
++CREATE FUNCTION aker_invalidate_random(float) RETURNS void
++	AS 'MODULE_PATHNAME', 'aker_invalidate_random' LANGUAGE C VOLATILE PARALLEL UNSAFE;
++
+ CREATE TYPE vector (
+ 	INPUT     = vector_in,
+ 	OUTPUT    = vector_out,
+diff --git a/src/ak_pgvector.c b/src/ak_pgvector.c
+new file mode 100644
+index 0000000..df22db6
+--- /dev/null
++++ b/src/ak_pgvector.c
+@@ -0,0 +1,211 @@
++#include "postgres.h"
++
++#include <assert.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++
++#include "commands/trigger.h"
++
++#include "ak_pgvector.h"
++
++/* pgvector type definitions (Vector) */
++#include "vector.h"
++
++/*
++ * Global Aker state (one instance per PostgreSQL backend process).
++ */
++int ak_requests_processed = 0;
++anns_cache_c_wrapper_t* ak_cache = NULL;
++
++/*
++ * Export hook registered via on_proc_exit.
++ */
++static void
++akExportAndDestroy(int code, Datum arg)
++{
++    (void)code;
++    (void)arg;
++
++    if (ak_cache == NULL)
++        return;
++
++    /* Export trace/telemetry first, then release resources. */
++    // akerExportTraceToFiles(ak_cache);
++    akerDestroyAnnsCache(ak_cache);
++    ak_cache = NULL;
++}
++
++float
++akDistanceFunction(uint8_t* a, uint8_t* b, size_t dim)
++{
++    if (a == NULL || b == NULL || dim == 0)
++        return 0.0f;
++
++    float* fa = (float*)a;
++    float* fb = (float*)b;
++
++    /* Select distance metric based on the runtime configuration. */
++    if (ak_cache != NULL && ak_cache->parameter.distance_metric == 1)
++        return akerInnerProductDistance(fa, fb, dim);
++    return akerL2Distance(fa, fb, dim);
++}
++
++bool
++akConversionFunction(void* src, size_t src_size, size_t dim, void* dst, uint8_t* aux)
++{
++    (void)aux;
++
++    if (src == NULL || dst == NULL)
++        return false;
++
++    const size_t required = dim * sizeof(float);
++    if (src_size < required)
++        return false;
++
++    memcpy(dst, src, required);
++    return true;
++}
++
++void
++akResultConversionFunction(
++    uint64_t vector_id,
++    uint8_t* vector_data,
++    size_t vector_data_size,
++    uint64_t aux_1,
++    uint64_t aux_2)
++{
++    if (vector_data == NULL)
++        return;
++
++    if (vector_data_size < sizeof(struct AkResult))
++        return;
++
++    /* Build an AkResult prefix in the provided payload buffer. */
++    struct AkResult result;
++    memset(&result, 0, sizeof(result));
++
++    result.vector_id = vector_id;
++
++    /* aux_1 encodes a float distance, aux_2 encodes an ItemPointerData. */
++    memcpy(&result.distance, &aux_1, sizeof(float));
++    memcpy(&result.tid, &aux_2, sizeof(ItemPointerData));
++
++    memcpy(vector_data, &result, sizeof(result));
++}
++
++void
++akInitFromEnv(void)
++{
++    if (ak_cache != NULL)
++        return;
++
++    fprintf(stdout, "[Aker] Initializing from _PG_init (pid=%d)\n", getpid());
++    fflush(stdout);
++
++    anns_cache_parameter_c_t parameter_info;
++    memset(&parameter_info, 0, sizeof(parameter_info));
++
++    /* Environment variable AKER_CONFIG_PATH must point to the cache configuration file. */
++    char* config_path = getenv("AKER_CONFIG_PATH");
++    if (config_path == NULL)
++    {
++        fprintf(stdout, "[Aker] Environment variable AKER_CONFIG_PATH not set.\n");
++        fflush(stdout);
++        exit(-1);
++    }
++
++    fprintf(stdout, "[Aker] AKER_CONFIG_PATH=%s\n", config_path);
++    fflush(stdout);
++
++    akerImportAnnsCacheConfig(config_path, &parameter_info);
++
++    ak_cache = akerCreateAnnsCache(parameter_info);
++    if (ak_cache == NULL)
++    {
++        fprintf(stdout, "[Aker] Failed to create cache instance.\n");
++        fflush(stdout);
++        exit(-1);
++    }
++
++    fprintf(stdout, "[Aker] Cache initialized successfully (%p)\n", (void*)ak_cache);
++    fflush(stdout);
++}
++
++void
++akRegisterExitHook(void)
++{
++    on_proc_exit(akExportAndDestroy, 0);
++}
++
++/*
++ * SQL-level integration (used by stress workloads).
++ *
++ * These entry points are exposed to SQL so stress/mixed workloads can:
++ * - mark deleted vectors (tombstone)
++ * - invalidate a random fraction of the cache
++ */
++
++FUNCTION_PREFIX PG_FUNCTION_INFO_V1(aker_mark_del_trigger);
++Datum
++aker_mark_del_trigger(PG_FUNCTION_ARGS)
++{
++    TriggerData* trigdata;
++    Relation rel;
++    HeapTuple tuple;
++    const char* colname;
++    AttrNumber attnum;
++    bool is_null;
++    Datum d;
++
++    if (!CALLED_AS_TRIGGER(fcinfo))
++        ereport(ERROR, (errmsg("aker_mark_del_trigger: not called as trigger")));
++
++    trigdata = (TriggerData*)fcinfo->context;
++
++    if (!TRIGGER_FIRED_FOR_ROW(trigdata->tg_event))
++        ereport(ERROR, (errmsg("aker_mark_del_trigger: must be a row-level trigger")));
++
++    rel = trigdata->tg_relation;
++    if (rel->rd_rel->relkind != RELKIND_RELATION)
++        ereport(ERROR, (errmsg("aker_mark_del_trigger: not fired on a table")));
++
++    tuple = trigdata->tg_trigtuple;
++
++    colname = (trigdata->tg_trigger->tgnargs >= 1) ? trigdata->tg_trigger->tgargs[0] : "embedding";
++    attnum = get_attnum(RelationGetRelid(rel), colname);
++    if (attnum <= 0)
++        ereport(ERROR, (errmsg("aker_mark_del_trigger: column \"%s\" not found", colname)));
++
++    d = heap_getattr(tuple, attnum, RelationGetDescr(rel), &is_null);
++    if (!is_null && ak_cache != NULL)
++    {
++        Vector* vec = (Vector*)PG_DETOAST_DATUM(d);
++        const size_t bytes = (size_t)(VARSIZE_ANY_EXHDR(vec) - 4);
++
++        if (bytes > 0)
++        {
++            uint64_t vid = akerDefaultHash((char*)vec->x, bytes);
++            akerMarkVectorDeleted(ak_cache, vid);
++        }
++
++        if ((Pointer)vec != DatumGetPointer(d))
++            pfree(vec);
++    }
++
++    PG_RETURN_POINTER(trigdata->tg_trigtuple);
++}
++
++FUNCTION_PREFIX PG_FUNCTION_INFO_V1(aker_invalidate_random);
++Datum
++aker_invalidate_random(PG_FUNCTION_ARGS)
++{
++    float percent = (float)PG_GETARG_FLOAT8(0);
++    if (ak_cache != NULL)
++        akerStressTestInvalidateRandom(ak_cache, percent);
++
++    PG_RETURN_VOID();
++}
+diff --git a/src/ak_pgvector.h b/src/ak_pgvector.h
+new file mode 100644
+index 0000000..3fe42d3
+--- /dev/null
++++ b/src/ak_pgvector.h
+@@ -0,0 +1,88 @@
++/*
++ * Aker integration helpers for pgvector.
++ *
++ * This module replaces the legacy glue code while preserving the
++ * same integration points in pgvector (scan/insert/trigger/exit hook).
++ *
++ * Legacy-compatible behavior:
++ * - vector_id is computed as a 64-bit hash of raw float bytes
++ * - cache-hit returns Heap TIDs without touching the underlying index
++ */
++
++#ifndef PGVECTOR_AK_PGVECTOR_H
++#define PGVECTOR_AK_PGVECTOR_H
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#include "postgres.h"
++#include "storage/itemptr.h"
++
++/* Aker C ABI (refactored snapshot). */
++#include "ak_anns_cache_c_wrapper.h"
++
++/* Opaque wrapper types used by pgvector integration code. */
++typedef char ak_vector_slot_t;
++typedef char ak_vector_view_t;
++typedef char ak_cache_entry_t;
++
++/*
++ * Global instance managed per PostgreSQL backend.
++ *
++ * SQL-visible entry points use the "aker_" prefix.
++ * Internally we use the Aker abbreviation "ak".
++ */
++extern int ak_requests_processed;
++extern anns_cache_c_wrapper_t* ak_cache;
++
++/*
++ * Result payload stored inside Aker's vector pool.
++ *
++ * Only this prefix is interpreted by the pgvector side when returning cached
++ * TIDs. The remainder of the Aker payload buffer (vector_in_bytes) is unused
++ * by pgvector and may be zero-filled.
++ *
++ */
++struct AkResult
++{
++    uint64_t vector_id;
++    ItemPointerData tid;
++    float distance;
++};
++
++/**
++ * @brief Distance function shim used by Aker.
++ *
++ * @param a Raw vector bytes (float array).
++ * @param b Raw vector bytes (float array).
++ * @param dim Vector dimension (number of float elements).
++ */
++float akDistanceFunction(uint8_t* a, uint8_t* b, size_t dim);
++
++/**
++ * @brief Conversion function shim (raw float bytes -> float array).
++ */
++bool akConversionFunction(void* src, size_t src_size, size_t dim, void* dst, uint8_t* aux);
++
++/**
++ * @brief Result transform shim used by Aker write-log paths.
++ */
++void akResultConversionFunction(
++    uint64_t vector_id,
++    uint8_t* vector_data,
++    size_t vector_data_size,
++    uint64_t aux_1,
++    uint64_t aux_2);
++
++/**
++ * @brief Initializes the global Aker instance from AKER_CONFIG_PATH.
++ */
++void akInitFromEnv(void);
++
++/**
++ * @brief Registers a backend exit hook to export traces and destroy the cache.
++ */
++void akRegisterExitHook(void);
++
++#endif /* PGVECTOR_AK_PGVECTOR_H */
+diff --git a/src/hnsw.h b/src/hnsw.h
+index 1fb0c24..1e46977 100644
+--- a/src/hnsw.h
++++ b/src/hnsw.h
+@@ -3,6 +3,9 @@
+ 
+ #include "postgres.h"
+ 
++/* Aker integration uses table_index_fetch_tuple() for MVCC visibility checks. */
++#include "access/tableam.h"
++
+ #include "access/genam.h"
+ #include "access/parallel.h"
+ #include "lib/pairingheap.h"
+@@ -378,6 +381,25 @@ typedef struct HnswScanOpaqueData
+ 
+ 	/* Support functions */
+ 	HnswSupport support;
++
++	/* Aker cache integration fields (legacy-compatible layout). */
++	uint64_t	ak_query_id;
++	char*		ak_query_vector_slot;
++	char*		ak_query_vector_view;
++
++	/* When cached */
++	bool		is_cached;
++	int		cached_in_topk;
++	char*		cached_entry;
++	int		returned;
++
++	/* When needs to be cached */
++	int		prepared_neighbors;
++	char*		prepared_results;
++
++	/* Mixed workload: MVCC visibility checks */
++	IndexFetchTableData*	iftd;
++	TupleTableSlot*		vslot;
+ }			HnswScanOpaqueData;
+ 
+ typedef HnswScanOpaqueData * HnswScanOpaque;
+diff --git a/src/hnswinsert.c b/src/hnswinsert.c
+index a5fac4e..9b5f461 100644
+--- a/src/hnswinsert.c
++++ b/src/hnswinsert.c
+@@ -1,6 +1,7 @@
+ #include "postgres.h"
+ 
+ #include <math.h>
++#include <string.h>
+ 
+ #include "access/generic_xlog.h"
+ #include "hnsw.h"
+@@ -9,6 +10,9 @@
+ #include "utils/datum.h"
+ #include "utils/memutils.h"
+ 
++/* Aker integration helpers */
++#include "ak_pgvector.h"
++
+ /*
+  * Get the insert page
+  */
+@@ -753,6 +757,57 @@ HnswInsertTuple(Relation index, Datum *values, bool *isnull, ItemPointer heaptid
+ 		return;
+ 
+ 	HnswInsertTupleOnDisk(index, &support, value, heaptid, false);
++
++	/*
++	 * Aker write-log integration:
++	 * Register the inserted vector so that Standard mode can update cached results.
++	 */
++	if (ak_cache != NULL)
++	{
++		Vector* new_vec = DatumGetVector(value);
++		float* new_vec_raw = new_vec->x;
++		size_t new_vec_size = (size_t)new_vec->dim * sizeof(float);
++
++		Assert(new_vec_size == (size_t)(VARSIZE_ANY_EXHDR(new_vec) - 4));
++
++		uint64_t hashed_id = akerDefaultHash((char*)new_vec_raw, new_vec_size);
++
++		struct AkResult dummy_result;
++		memset(&dummy_result, 0, sizeof(dummy_result));
++		dummy_result.vector_id = hashed_id;
++		dummy_result.tid = *heaptid;
++		dummy_result.distance = 0.0f;
++
++		uint64_t aux_data_1 = 0;
++		uint64_t aux_data_2 = 0;
++		memcpy(&aux_data_1, &dummy_result.distance, sizeof(float));
++		memcpy(&aux_data_2, &dummy_result.tid, sizeof(ItemPointerData));
++
++		char* new_ak_vec_slot = akerCreateVectorSlot(
++			hashed_id,
++			new_vec_size,
++			(char*)new_vec_raw,
++			aux_data_1,
++			aux_data_2,
++			0.0f);
++
++		char* new_ak_vec_view = akerCreateVectorView(
++			new_ak_vec_slot,
++			(size_t)new_vec->dim,
++			new_vec_size,
++			akConversionFunction);
++
++		akerInsertWriteLogEntry(
++			ak_cache,
++			new_ak_vec_view,
++			akDistanceFunction,
++			akResultConversionFunction);
++
++		akerDestroyVectorView(new_ak_vec_view);
++		akerDestroyVectorSlot(new_ak_vec_slot);
++
++		ak_requests_processed++;
++	}
+ }
+ 
+ /*
+diff --git a/src/hnswscan.c b/src/hnswscan.c
+index 955998a..c2dc52a 100644
+--- a/src/hnswscan.c
++++ b/src/hnswscan.c
+@@ -1,13 +1,18 @@
+ #include "postgres.h"
+ 
+ #include "access/relscan.h"
++#include "access/tableam.h"
+ #include "hnsw.h"
+ #include "pgstat.h"
++#include "executor/executor.h"
+ #include "storage/bufmgr.h"
+ #include "storage/lmgr.h"
+ #include "utils/float.h"
+ #include "utils/memutils.h"
+ 
++/* Aker integration helpers */
++#include "ak_pgvector.h"
++
+ /*
+  * Algorithm 5 from paper
+  */
+@@ -33,15 +38,20 @@ GetScanItems(IndexScanDesc scan, Datum value)
+ 	if (entryPoint == NULL)
+ 		return NIL;
+ 
+-	ep = list_make1(HnswEntryCandidate(base, entryPoint, q, index, support, false));
++	/*
++	 * Legacy patch behavior:
++	 * Load vectors during search so that we can hash raw vector bytes
++	 * when caching results.
++	 */
++	ep = list_make1(HnswEntryCandidate(base, entryPoint, q, index, support, true));
+ 
+ 	for (int lc = entryPoint->level; lc >= 1; lc--)
+ 	{
+-		w = HnswSearchLayer(base, q, ep, 1, lc, index, support, m, false, NULL, NULL, NULL, true, NULL);
++		w = HnswSearchLayer(base, q, ep, 1, lc, index, support, m, true, NULL, NULL, NULL, true, NULL);
+ 		ep = w;
+ 	}
+ 
+-	return HnswSearchLayer(base, q, ep, hnsw_ef_search, 0, index, support, m, false, NULL, &so->v, hnsw_iterative_scan != HNSW_ITERATIVE_SCAN_OFF ? &so->discarded : NULL, true, &so->tuples);
++	return HnswSearchLayer(base, q, ep, hnsw_ef_search, 0, index, support, m, true, NULL, &so->v, hnsw_iterative_scan != HNSW_ITERATIVE_SCAN_OFF ? &so->discarded : NULL, true, &so->tuples);
+ }
+ 
+ /*
+@@ -146,6 +156,19 @@ hnswbeginscan(Relation index, int nkeys, int norderbys)
+ 
+ 	scan->opaque = so;
+ 
++	/* Initialize Aker integration state */
++	so->ak_query_id = 0;
++	so->ak_query_vector_slot = NULL;
++	so->ak_query_vector_view = NULL;
++	so->is_cached = false;
++	so->cached_in_topk = 0;
++	so->cached_entry = NULL;
++	so->returned = 0;
++	so->prepared_neighbors = 0;
++	so->prepared_results = NULL;
++	so->iftd = NULL;
++	so->vslot = NULL;
++
+ 	return scan;
+ }
+ 
+@@ -157,6 +180,32 @@ hnswrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int no
+ {
+ 	HnswScanOpaque so = (HnswScanOpaque) scan->opaque;
+ 
++	/*
++	 * Release any per-scan wrappers created by previous executions.
++	 * These are allocated with `new` via the Aker C ABI and must be freed explicitly.
++	 */
++	if (so->ak_query_vector_view != NULL)
++	{
++		akerDestroyVectorView(so->ak_query_vector_view);
++		so->ak_query_vector_view = NULL;
++	}
++	if (so->ak_query_vector_slot != NULL)
++	{
++		akerDestroyVectorSlot(so->ak_query_vector_slot);
++		so->ak_query_vector_slot = NULL;
++	}
++
++	if (so->iftd != NULL)
++	{
++		table_index_fetch_end(so->iftd);
++		so->iftd = NULL;
++	}
++	if (so->vslot != NULL)
++	{
++		ExecDropSingleTupleTableSlot(so->vslot);
++		so->vslot = NULL;
++	}
++
+ 	so->first = true;
+ 	/* v and discarded are allocated in tmpCtx */
+ 	so->v.tids = NULL;
+@@ -165,6 +214,21 @@ hnswrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int no
+ 	so->previousDistance = -get_float8_infinity();
+ 	MemoryContextReset(so->tmpCtx);
+ 
++	/* Mixed workload helpers: MVCC visibility checks for cached inserts */
++	so->iftd = table_index_fetch_begin(scan->heapRelation);
++	so->vslot = table_slot_create(scan->heapRelation, NULL);
++	/* Ensure clean state */
++	table_index_fetch_reset(so->iftd);
++	ExecClearTuple(so->vslot);
++
++	/* Reset Aker scan state */
++	so->is_cached = false;
++	so->cached_in_topk = 0;
++	so->cached_entry = NULL;
++	so->returned = 0;
++	so->prepared_neighbors = 0;
++	so->prepared_results = NULL;
++
+ 	if (keys && scan->numberOfKeys > 0)
+ 		memmove(scan->keyData, keys, scan->numberOfKeys * sizeof(ScanKeyData));
+ 
+@@ -207,15 +271,105 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
+ 		value = GetScanValue(scan);
+ 
+ 		/*
+-		 * Get a shared lock. This allows vacuum to ensure no in-flight scans
+-		 * before marking tuples as deleted.
++		 * Legacy patch behavior:
++		 * - Compute qvid from raw float bytes
++		 * - Query Aker cache (exact-hit or approx-hit)
++		 * - If hit, skip index scan entirely
+ 		 */
+-		LockPage(scan->indexRelation, HNSW_SCAN_LOCK, ShareLock);
++		so->is_cached = false;
++		so->cached_entry = NULL;
++		so->cached_in_topk = 0;
++		so->returned = 0;
++		so->prepared_neighbors = 0;
++		so->prepared_results = NULL;
++
++		if (ak_cache != NULL)
++		{
++			Vector* qvec = DatumGetVector(scan->orderByData->sk_argument);
++			const size_t dim = (size_t)ak_cache->parameter.vector_format.dimension;
++			const size_t vector_in_bytes = ak_cache->parameter.vector_format.vector_in_bytes;
++
++			/* Copy query bytes into a stable buffer owned by tmpCtx. */
++			char* ak_qvec_buffer = (char*)MemoryContextAlloc(so->tmpCtx, vector_in_bytes);
++			memcpy(ak_qvec_buffer, qvec->x, vector_in_bytes);
++
++			so->ak_query_id = akerDefaultHash((char*)qvec->x, VARSIZE_ANY_EXHDR(qvec) - 4);
++
++			so->ak_query_vector_slot = akerCreateVectorSlot(
++				so->ak_query_id,
++				vector_in_bytes,
++				ak_qvec_buffer,
++				0,
++				0,
++				0.0f);
++
++			so->ak_query_vector_view = akerCreateVectorView(
++				so->ak_query_vector_slot,
++				dim,
++				vector_in_bytes,
++				akConversionFunction);
++
++			bool similar_entry = false;
++			bool is_invalid = false;
++			char* found_entry = akerGetCacheEntry(
++				ak_cache,
++				so->ak_query_vector_view,
++				&similar_entry,
++				&is_invalid,
++				akDistanceFunction);
++
++			if (found_entry != NULL && !is_invalid)
++			{
++				so->is_cached = true;
++				so->cached_entry = found_entry;
++				so->cached_in_topk = (int)ak_cache->parameter.capacity.in_topk;
++				so->returned = 0;
+ 
+-		so->w = GetScanItems(scan, value);
++				/*
++				 * Legacy behavior: on approx-hit, allocate a dummy entry and link it
++				 * to the representative so that future queries can exact-hit.
++				 */
++				if (similar_entry)
++				{
++					uint64_t found_id = akerGetQueryVectorIdFromCacheEntry(found_entry);
++					const size_t neighbors =
++						ak_cache->parameter.capacity.in_topk + ak_cache->parameter.capacity.top_delta;
++
++					char* new_cache_entry = akerCreateCacheEntry(
++						ak_cache,
++						so->ak_query_vector_slot,
++						neighbors,
++						NULL);
++					(void)akerLinkCacheEntry(ak_cache, new_cache_entry, found_id);
++				}
++			}
++		}
+ 
+-		/* Release shared lock */
+-		UnlockPage(scan->indexRelation, HNSW_SCAN_LOCK, ShareLock);
++		if (!so->is_cached)
++		{
++			/*
++			* Get a shared lock. This allows vacuum to ensure no in-flight scans
++			* before marking tuples as deleted.
++			*/
++			LockPage(scan->indexRelation, HNSW_SCAN_LOCK, ShareLock);
++			so->w = GetScanItems(scan, value);
++			UnlockPage(scan->indexRelation, HNSW_SCAN_LOCK, ShareLock);
++
++			if (ak_cache != NULL)
++			{
++				const size_t neighbors =
++					ak_cache->parameter.capacity.in_topk + ak_cache->parameter.capacity.top_delta;
++				so->prepared_results = (char*)MemoryContextAlloc(
++					so->tmpCtx,
++					sizeof(struct AkResult) * neighbors);
++			}
++			so->prepared_neighbors = 0;
++			so->returned = 0;
++		}
++		else
++		{
++			so->w = NIL;
++		}
+ 
+ 		so->first = false;
+ 
+@@ -224,11 +378,49 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
+ #endif
+ 	}
+ 
++	/*
++	 * Cache-hit fast path: return cached TIDs without scanning the index.
++	 */
++	if (so->is_cached)
++	{
++		if (so->returned < so->cached_in_topk)
++		{
++			char* vector_slot_wrapper = akerGetResultVectorSlotAt(so->cached_entry, so->returned);
++			so->returned++;
++
++			struct AkResult* result_slot =
++				(struct AkResult*)akerGetVectorDataFromVectorSlot(vector_slot_wrapper);
++
++			scan->xs_heaptid = result_slot->tid;
++			scan->xs_recheck = false;
++			scan->xs_recheckorderby = false;
++
++			MemoryContextSwitchTo(oldCtx);
++			return true;
++		}
++
++		MemoryContextSwitchTo(oldCtx);
++		return false;
++	}
++
++	/*
++	 * Legacy behavior: enforce strict iterative scan ordering for the miss path.
++	 */
++	hnsw_iterative_scan = HNSW_ITERATIVE_SCAN_STRICT;
++
+ 	for (;;)
+ 	{
+ 		char	   *base = NULL;
+ 		HnswSearchCandidate *sc;
+ 		HnswElement element;
++		/*
++		 * IMPORTANT: copy the ItemPointerData by value.
++		 *
++		 * The miss-path cache bookkeeping (top_delta extras) may pop/free
++		 * the current element/search-candidate from so->w when the last
++		 * heaptid is consumed. Keeping only a pointer into element->heaptids
++		 * would become a use-after-free and can yield corrupted TIDs.
++		 */
+ 		ItemPointer heaptid;
+ 
+ 		if (list_length(so->w) == 0)
+@@ -294,7 +486,6 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
+ 		}
+ 
+ 		heaptid = &element->heaptids[--element->heaptidsLength];
+-
+ 		if (hnsw_iterative_scan == HNSW_ITERATIVE_SCAN_STRICT)
+ 		{
+ 			if (sc->distance < so->previousDistance)
+@@ -303,11 +494,148 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
+ 			so->previousDistance = sc->distance;
+ 		}
+ 
+-		MemoryContextSwitchTo(oldCtx);
++		/*
++		 * Miss path: build a cache entry from the first (in_topk + top_delta)
++		 * visible results, mirroring the legacy patch flow.
++		 */
++		if (ak_cache != NULL && so->prepared_results != NULL)
++		{
++			bool all_dead = false;
++			bool call_again = false;
++			ExecClearTuple(so->vslot);
++			bool visible = table_index_fetch_tuple(
++				so->iftd,
++				heaptid,
++				scan->xs_snapshot,
++				so->vslot,
++				&call_again,
++				&all_dead);
++
++			if (visible)
++			{
++				Datum vector_datum = HnswGetValue(base, element);
++				Vector* vec = DatumGetVector(vector_datum);
++
++				struct AkResult* result_slot = (struct AkResult*)so->prepared_results;
++				result_slot[so->prepared_neighbors].tid = *heaptid;
++				result_slot[so->prepared_neighbors].distance = (float)sc->distance;
++				result_slot[so->prepared_neighbors].vector_id = akerDefaultHash(
++					(char*)vec->x,
++					VARSIZE_ANY_EXHDR(vec) - 4);
++				so->prepared_neighbors++;
++			}
++
++			scan->xs_heaptid = *heaptid;
++			scan->xs_recheck = false;
++			scan->xs_recheckorderby = false;
+ 
+-		scan->xs_heaptid = *heaptid;
+-		scan->xs_recheck = false;
+-		scan->xs_recheckorderby = false;
++			if (so->prepared_neighbors == (int)ak_cache->parameter.capacity.in_topk)
++			{
++				const int extras = (int)ak_cache->parameter.capacity.top_delta;
++				struct AkResult* result_slot = (struct AkResult*)so->prepared_results;
++
++				for (int j = 0; j < extras; j++)
++				{
++					while (list_length(so->w) == 0)
++					{
++						if (hnsw_iterative_scan == HNSW_ITERATIVE_SCAN_OFF)
++							break;
++
++						if (so->discarded == NULL)
++							break;
++
++						if (so->tuples >= hnsw_max_scan_tuples ||
++							MemoryContextMemAllocated(so->tmpCtx, false) > so->maxMemory)
++						{
++							if (pairingheap_is_empty(so->discarded))
++								break;
++
++							so->w = lappend(
++								so->w,
++								HnswGetSearchCandidate(w_node, pairingheap_remove_first(so->discarded)));
++						}
++						else
++						{
++							LockPage(scan->indexRelation, HNSW_SCAN_LOCK, ShareLock);
++							so->w = ResumeScanItems(scan);
++							UnlockPage(scan->indexRelation, HNSW_SCAN_LOCK, ShareLock);
++						}
++
++						if (list_length(so->w) == 0)
++							break;
++					}
++
++					if (list_length(so->w) == 0)
++						break;
++
++					HnswSearchCandidate* sc2 = llast(so->w);
++					HnswElement elem2 = HnswPtrAccess(base, sc2->element);
++
++					if (elem2->heaptidsLength == 0)
++					{
++						so->w = list_delete_last(so->w);
++						if (hnsw_iterative_scan != HNSW_ITERATIVE_SCAN_OFF)
++						{
++							pfree(elem2);
++							pfree(sc2);
++						}
++						j--;
++						continue;
++					}
++					else
++					{
++						ItemPointer extra_tid = &elem2->heaptids[--elem2->heaptidsLength];
++						if (sc2->distance < so->previousDistance)
++						{
++							j--;
++							continue;
++						}
++						so->previousDistance = sc2->distance;
++
++						Datum vector_datum = HnswGetValue(base, elem2);
++						Vector* vec = DatumGetVector(vector_datum);
++
++						result_slot[so->prepared_neighbors].tid = *extra_tid;
++						result_slot[so->prepared_neighbors].distance = (float)sc2->distance;
++						result_slot[so->prepared_neighbors].vector_id = akerDefaultHash(
++							(char*)vec->x,
++							VARSIZE_ANY_EXHDR(vec) - 4);
++						so->prepared_neighbors++;
++					}
++				}
++
++				char** vector_ref_list =
++					(char**)MemoryContextAlloc(so->tmpCtx, sizeof(char*) * (size_t)so->prepared_neighbors);
++				const size_t payload_bytes = sizeof(struct AkResult);
++
++				for (int i = 0; i < so->prepared_neighbors; i++)
++				{
++					vector_ref_list[i] = akerCreateVectorSlot(
++						result_slot[i].vector_id,
++						payload_bytes,
++						&(result_slot[i]),
++						0,
++						0,
++						result_slot[i].distance);
++
++					akerSetDistanceForVectorSlot(vector_ref_list[i], result_slot[i].distance);
++				}
++
++				char* cache_entry = akerCreateCacheEntry(
++					ak_cache,
++					so->ak_query_vector_slot,
++					(size_t)so->prepared_neighbors,
++					vector_ref_list);
++
++				const bool inserted = akerInsertCacheEntry(
++					ak_cache,
++					so->ak_query_id,
++					cache_entry,
++					so->ak_query_vector_view);
++			}
++		}
++
++		MemoryContextSwitchTo(oldCtx);
+ 		return true;
+ 	}
+ 
+@@ -323,6 +651,36 @@ hnswendscan(IndexScanDesc scan)
+ {
+ 	HnswScanOpaque so = (HnswScanOpaque) scan->opaque;
+ 
++	/* Trigger write-log slow-path processing at scan end (legacy behavior). */
++	if (ak_cache != NULL)
++		akerProcessWriteLogEntries(ak_cache, akDistanceFunction, akResultConversionFunction);
++
++	ak_requests_processed++;
++
++	/* Mixed workload helpers */
++	if (so->iftd != NULL)
++	{
++		table_index_fetch_end(so->iftd);
++		so->iftd = NULL;
++	}
++	if (so->vslot != NULL)
++	{
++		ExecDropSingleTupleTableSlot(so->vslot);
++		so->vslot = NULL;
++	}
++
++	/* Free per-scan Aker wrappers allocated with `new`. */
++	if (so->ak_query_vector_view != NULL)
++	{
++		akerDestroyVectorView(so->ak_query_vector_view);
++		so->ak_query_vector_view = NULL;
++	}
++	if (so->ak_query_vector_slot != NULL)
++	{
++		akerDestroyVectorSlot(so->ak_query_vector_slot);
++		so->ak_query_vector_slot = NULL;
++	}
++
+ 	MemoryContextDelete(so->tmpCtx);
+ 
+ 	pfree(so);
+diff --git a/src/ivfflat.h b/src/ivfflat.h
+index c296b66..6289aec 100644
+--- a/src/ivfflat.h
++++ b/src/ivfflat.h
+@@ -3,6 +3,9 @@
+ 
+ #include "postgres.h"
+ 
++/* Aker integration uses table_index_fetch_tuple() for MVCC visibility checks. */
++#include "access/tableam.h"
++
+ #include "access/genam.h"
+ #include "access/generic_xlog.h"
+ #include "access/parallel.h"
+@@ -262,6 +265,25 @@ typedef struct IvfflatScanOpaqueData
+ 	Datum		value;
+ 	MemoryContext tmpCtx;
+ 
++	/* Aker cache integration fields (legacy-compatible layout). */
++	uint64_t	ak_query_id;
++	char*		ak_query_vector_slot;
++	char*		ak_query_vector_view;
++
++	/* When cached */
++	bool		is_cached;
++	int		cached_in_topk;
++	char*		cached_entry;
++	int		returned;
++
++	/* When needs to be cached */
++	int		prepared_neighbors;
++	char*		prepared_results;
++
++	/* Mixed workload: MVCC visibility checks */
++	IndexFetchTableData*	iftd;
++	TupleTableSlot*		valslot;
++
+ 	/* Sorting */
+ 	Tuplesortstate *sortstate;
+ 	TupleDesc	tupdesc;
+diff --git a/src/ivfinsert.c b/src/ivfinsert.c
+index 014c9be..0ba5348 100644
+--- a/src/ivfinsert.c
++++ b/src/ivfinsert.c
+@@ -2,8 +2,13 @@
+ 
+ #include <float.h>
+ 
++#include <string.h>
++
+ #include "access/generic_xlog.h"
+ #include "ivfflat.h"
++
++/* Aker integration helpers */
++#include "ak_pgvector.h"
+ #include "storage/bufmgr.h"
+ #include "storage/lmgr.h"
+ #include "utils/memutils.h"
+@@ -173,6 +178,57 @@ InsertTuple(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, R
+ 	/* Update the insert page */
+ 	if (insertPage != originalInsertPage)
+ 		IvfflatUpdateList(index, listInfo, insertPage, originalInsertPage, InvalidBlockNumber, MAIN_FORKNUM);
++
++	/*
++	 * Aker write-log integration:
++	 * Register the inserted vector so that Standard mode can update cached results.
++	 */
++	if (ak_cache != NULL)
++	{
++		Vector* new_vec = DatumGetVector(value);
++		float* new_vec_raw = new_vec->x;
++		size_t new_vec_size = (size_t)new_vec->dim * sizeof(float);
++
++		Assert(new_vec_size == (size_t)(VARSIZE_ANY_EXHDR(new_vec) - 4));
++
++		uint64_t hashed_id = akerDefaultHash((char*)new_vec_raw, new_vec_size);
++
++		struct AkResult dummy_result;
++		memset(&dummy_result, 0, sizeof(dummy_result));
++		dummy_result.vector_id = hashed_id;
++		dummy_result.tid = *heap_tid;
++		dummy_result.distance = 0.0f;
++
++		uint64_t aux_data_1 = 0;
++		uint64_t aux_data_2 = 0;
++		memcpy(&aux_data_1, &dummy_result.distance, sizeof(float));
++		memcpy(&aux_data_2, &dummy_result.tid, sizeof(ItemPointerData));
++
++		char* new_ak_vec_slot = akerCreateVectorSlot(
++			hashed_id,
++			new_vec_size,
++			(char*)new_vec_raw,
++			aux_data_1,
++			aux_data_2,
++			0.0f);
++
++		char* new_ak_vec_view = akerCreateVectorView(
++			new_ak_vec_slot,
++			(size_t)new_vec->dim,
++			new_vec_size,
++			akConversionFunction);
++
++		akerInsertWriteLogEntry(
++			ak_cache,
++			new_ak_vec_view,
++			akDistanceFunction,
++			akResultConversionFunction);
++
++		akerDestroyVectorView(new_ak_vec_view);
++		akerDestroyVectorSlot(new_ak_vec_slot);
++
++		ak_requests_processed++;
++	}
+ }
+ 
+ /*
+diff --git a/src/ivfscan.c b/src/ivfscan.c
+index 6cc5d2e..0faade8 100644
+--- a/src/ivfscan.c
++++ b/src/ivfscan.c
+@@ -9,9 +9,13 @@
+ #include "ivfflat.h"
+ #include "miscadmin.h"
+ #include "pgstat.h"
++#include "executor/executor.h"
+ #include "storage/bufmgr.h"
+ #include "utils/memutils.h"
+ 
++/* Aker integration helpers */
++#include "ak_pgvector.h"
++
+ #define GetScanList(ptr) pairingheap_container(IvfflatScanList, ph_node, ptr)
+ #define GetScanListConst(ptr) pairingheap_const_container(IvfflatScanList, ph_node, ptr)
+ 
+@@ -157,6 +161,25 @@ GetScanItems(IndexScanDesc scan, Datum value)
+ 				slot->tts_isnull[0] = false;
+ 				slot->tts_values[1] = PointerGetDatum(&itup->t_tid);
+ 				slot->tts_isnull[1] = false;
++
++				/* Record the raw vector bytes for cache insertion (must survive buffer unlock). */
++				if (!isnull)
++				{
++					char* vector = DatumGetPointer(datum);
++					size_t vector_size = VARSIZE_ANY(vector);
++
++					char* vector_copy = (char*)MemoryContextAlloc(so->tmpCtx, vector_size);
++					memcpy(vector_copy, vector, vector_size);
++
++					slot->tts_values[2] = PointerGetDatum(vector_copy);
++					slot->tts_isnull[2] = false;
++				}
++				else
++				{
++					slot->tts_values[2] = PointerGetDatum(NULL);
++					slot->tts_isnull[2] = true;
++				}
++
+ 				ExecStoreVirtualTuple(slot);
+ 
+ 				tuplesort_puttupleslot(so->sortstate, slot);
+@@ -272,6 +295,17 @@ ivfflatbeginscan(Relation index, int nkeys, int norderbys)
+ 	so->maxProbes = maxProbes;
+ 	so->dimensions = dimensions;
+ 
++	/* Initialize Aker integration state */
++	so->ak_query_id = 0;
++	so->ak_query_vector_slot = NULL;
++	so->ak_query_vector_view = NULL;
++	so->is_cached = false;
++	so->cached_in_topk = 0;
++	so->cached_entry = NULL;
++	so->returned = 0;
++	so->prepared_neighbors = 0;
++	so->prepared_results = NULL;
++
+ 	/* Set support functions */
+ 	so->procinfo = index_getprocinfo(index, 1, IVFFLAT_DISTANCE_PROC);
+ 	so->normprocinfo = IvfflatOptionalProcInfo(index, IVFFLAT_NORM_PROC);
+@@ -284,10 +318,24 @@ ivfflatbeginscan(Relation index, int nkeys, int norderbys)
+ 	oldCtx = MemoryContextSwitchTo(so->tmpCtx);
+ 
+ 	/* Create tuple description for sorting */
+-	so->tupdesc = CreateTemplateTupleDesc(2);
++	so->tupdesc = CreateTemplateTupleDesc(3);
+ 	TupleDescInitEntry(so->tupdesc, (AttrNumber) 1, "distance", FLOAT8OID, -1, 0);
+ 	TupleDescInitEntry(so->tupdesc, (AttrNumber) 2, "heaptid", TIDOID, -1, 0);
+ 
++	/* Store raw vector bytes in the sort tuples for cache insertion (legacy behavior). */
++	TupleDesc	vector_tuple_desc = RelationGetDescr(index);
++	TupleDescInitEntry(
++		so->tupdesc,
++		(AttrNumber) 3,
++		"vector",
++		TupleDescAttr(vector_tuple_desc, 0)->atttypid,
++		-1,
++		0);
++
++	/* Mixed workload helpers (MVCC visibility checks for cache population). */
++	so->iftd = NULL;
++	so->valslot = NULL;
++
+ 	/* Prep sort */
+ 	so->sortstate = InitScanSortState(so->tupdesc);
+ 
+@@ -322,10 +370,53 @@ ivfflatrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int
+ {
+ 	IvfflatScanOpaque so = (IvfflatScanOpaque) scan->opaque;
+ 
++	/*
++	 * Release any per-scan wrappers created by previous executions.
++	 * These are allocated with `new` via the Aker C ABI and must be freed explicitly.
++	 */
++	if (so->ak_query_vector_view != NULL)
++	{
++		akerDestroyVectorView(so->ak_query_vector_view);
++		so->ak_query_vector_view = NULL;
++	}
++	if (so->ak_query_vector_slot != NULL)
++	{
++		akerDestroyVectorSlot(so->ak_query_vector_slot);
++		so->ak_query_vector_slot = NULL;
++	}
++
++	/* Mixed workload helpers */
++	if (so->iftd != NULL)
++	{
++		table_index_fetch_end(so->iftd);
++		so->iftd = NULL;
++	}
++	if (so->valslot != NULL)
++	{
++		ExecDropSingleTupleTableSlot(so->valslot);
++		so->valslot = NULL;
++	}
++
+ 	so->first = true;
+ 	pairingheap_reset(so->listQueue);
+ 	so->listIndex = 0;
+ 
++	/* Mixed workload helpers: MVCC visibility checks for cache population */
++	so->iftd = table_index_fetch_begin(scan->heapRelation);
++	so->valslot = table_slot_create(scan->heapRelation, NULL);
++	
++	/* Ensure clean state */
++	table_index_fetch_reset(so->iftd);
++	ExecClearTuple(so->valslot);
++
++	/* Reset Aker scan state */
++	so->is_cached = false;
++	so->cached_in_topk = 0;
++	so->cached_entry = NULL;
++	so->returned = 0;
++	so->prepared_neighbors = 0;
++	so->prepared_results = NULL;
++
+ 	if (keys && scan->numberOfKeys > 0)
+ 		memmove(scan->keyData, keys, scan->numberOfKeys * sizeof(ScanKeyData));
+ 
+@@ -353,6 +444,111 @@ ivfflatgettuple(IndexScanDesc scan, ScanDirection dir)
+ 	{
+ 		Datum		value;
+ 
++		/*
++		 * Legacy patch behavior:
++		 * - Compute qvid from raw float bytes
++		 * - Query Aker cache (exact-hit or approx-hit)
++		 * - If hit, skip index scan entirely
++		 */
++		so->is_cached = false;
++		so->cached_entry = NULL;
++		so->cached_in_topk = 0;
++		so->returned = 0;
++		so->prepared_neighbors = 0;
++		so->prepared_results = NULL;
++
++		/* Ensure MVCC fetch helpers exist when caching is enabled (mixed workloads). */
++		if (ak_cache != NULL)
++		{
++			if (so->iftd == NULL)
++				so->iftd = table_index_fetch_begin(scan->heapRelation);
++			if (so->valslot == NULL)
++				so->valslot = table_slot_create(scan->heapRelation, NULL);
++
++			/* Ensure clean state */
++			table_index_fetch_reset(so->iftd);
++			ExecClearTuple(so->valslot);
++		}
++
++		if (ak_cache != NULL && scan->orderByData != NULL &&
++			!(scan->orderByData->sk_flags & SK_ISNULL))
++		{
++			Vector* qvec = DatumGetVector(scan->orderByData->sk_argument);
++			const size_t dim = (size_t)ak_cache->parameter.vector_format.dimension;
++			const size_t vector_in_bytes = ak_cache->parameter.vector_format.vector_in_bytes;
++
++			Assert(vector_in_bytes == (size_t)(VARSIZE_ANY_EXHDR(qvec) - 4));
++
++			/* Copy query bytes into a stable buffer owned by tmpCtx. */
++			char* ak_qvec_buffer = (char*)MemoryContextAlloc(so->tmpCtx, vector_in_bytes);
++			memcpy(ak_qvec_buffer, qvec->x, vector_in_bytes);
++
++			so->ak_query_id = akerDefaultHash((char*)qvec->x, (size_t)(VARSIZE_ANY_EXHDR(qvec) - 4));
++
++			so->ak_query_vector_slot = akerCreateVectorSlot(
++				so->ak_query_id,
++				vector_in_bytes,
++				ak_qvec_buffer,
++				0,
++				0,
++				0.0f);
++
++			so->ak_query_vector_view = akerCreateVectorView(
++				so->ak_query_vector_slot,
++				dim,
++				vector_in_bytes,
++				akConversionFunction);
++
++			bool similar_entry = false;
++			bool is_invalid = false;
++			char* found_entry = akerGetCacheEntry(
++				ak_cache,
++				so->ak_query_vector_view,
++				&similar_entry,
++				&is_invalid,
++				akDistanceFunction);
++
++			if (found_entry != NULL && !is_invalid)
++			{
++				so->is_cached = true;
++				so->cached_entry = found_entry;
++				so->cached_in_topk = (int)ak_cache->parameter.capacity.in_topk;
++				so->returned = 0;
++
++				/*
++				 * Legacy behavior: on approx-hit, allocate a dummy entry and link it
++				 * to the representative so that future queries can exact-hit.
++				 */
++				if (similar_entry)
++				{
++					uint64_t found_id = akerGetQueryVectorIdFromCacheEntry(found_entry);
++					const size_t neighbors =
++						ak_cache->parameter.capacity.in_topk + ak_cache->parameter.capacity.top_delta;
++
++					char* new_cache_entry = akerCreateCacheEntry(
++						ak_cache,
++						so->ak_query_vector_slot,
++						neighbors,
++						NULL);
++					(void)akerLinkCacheEntry(ak_cache, new_cache_entry, found_id);
++				}
++			}
++			else
++			{
++				const size_t neighbors =
++					ak_cache->parameter.capacity.in_topk + ak_cache->parameter.capacity.top_delta;
++				so->prepared_results = (char*)MemoryContextAlloc(
++					so->tmpCtx,
++					sizeof(struct AkResult) * neighbors);
++				so->prepared_neighbors = 0;
++				so->returned = 0;
++			}
++		}
++
++		so->first = false;
++
++		if (!so->is_cached)
++		{
+ 		/* Count index scan for stats */
+ 		pgstat_count_index_scan(scan->indexRelation);
+ 
+@@ -368,9 +564,31 @@ ivfflatgettuple(IndexScanDesc scan, ScanDirection dir)
+ 		value = GetScanValue(scan);
+ 		IvfflatBench("GetScanLists", GetScanLists(scan, value));
+ 		IvfflatBench("GetScanItems", GetScanItems(scan, value));
+-		so->first = false;
+ 		so->value = value;
+ 	}
++	}
++
++	/*
++	 * Cache-hit fast path: return cached TIDs without scanning the index.
++	 */
++	if (so->is_cached)
++	{
++		if (so->returned < so->cached_in_topk)
++		{
++			char* vector_slot_wrapper = akerGetResultVectorSlotAt(so->cached_entry, so->returned);
++			so->returned++;
++
++			struct AkResult* result_slot =
++				(struct AkResult*)akerGetVectorDataFromVectorSlot(vector_slot_wrapper);
++
++			scan->xs_heaptid = result_slot->tid;
++			scan->xs_recheck = false;
++			scan->xs_recheckorderby = false;
++			return true;
++		}
++
++		return false;
++	}
+ 
+ 	while (!tuplesort_gettupleslot(so->sortstate, true, false, so->mslot, NULL))
+ 	{
+@@ -382,6 +600,118 @@ ivfflatgettuple(IndexScanDesc scan, ScanDirection dir)
+ 
+ 	heaptid = (ItemPointer) DatumGetPointer(slot_getattr(so->mslot, 2, &isnull));
+ 
++	/*
++	 * Miss path: populate prepared_results with visible results and insert into cache
++	 * once we have in_topk (+top_delta) entries, mirroring the legacy patch.
++	 */
++	if (ak_cache != NULL && so->prepared_results != NULL && so->iftd != NULL && so->valslot != NULL)
++	{
++		bool all_dead = false;
++		bool call_again = false;
++		ExecClearTuple(so->valslot);
++		bool visible = table_index_fetch_tuple(
++			so->iftd,
++			heaptid,
++			scan->xs_snapshot,
++			so->valslot,
++			&call_again,
++			&all_dead);
++
++		if (visible)
++		{
++			struct AkResult* result_slot = (struct AkResult*)so->prepared_results;
++			Datum dist_datum = slot_getattr(so->mslot, 1, &isnull);
++			Datum vec_datum = slot_getattr(so->mslot, 3, &isnull);
++
++			result_slot[so->prepared_neighbors].tid = *heaptid;
++			result_slot[so->prepared_neighbors].distance = (float)DatumGetFloat8(dist_datum);
++
++			Vector* vec = DatumGetVector(vec_datum);
++			result_slot[so->prepared_neighbors].vector_id = akerDefaultHash(
++				(char*)vec->x,
++				(size_t)(VARSIZE_ANY_EXHDR(vec) - 4));
++			so->prepared_neighbors++;
++		}
++
++		if (so->prepared_neighbors == (int)ak_cache->parameter.capacity.in_topk)
++		{
++			const int extras = (int)ak_cache->parameter.capacity.top_delta;
++			struct AkResult* result_slot = (struct AkResult*)so->prepared_results;
++
++			/* Fetch additional results for cache bookkeeping (extras). */
++			for (int j = 0; j < extras; j++)
++			{
++				bool maxed = false;
++				while (!tuplesort_gettupleslot(so->sortstate, true, false, so->mslot, NULL))
++				{
++					if (so->listIndex == so->maxProbes)
++					{
++						maxed = true;
++						break;
++					}
++
++					IvfflatBench("GetScanItems", GetScanItems(scan, so->value));
++				}
++
++				if (maxed)
++					break;
++
++				ItemPointer extra_tid = (ItemPointer) DatumGetPointer(slot_getattr(so->mslot, 2, &isnull));
++				Datum extra_dist = slot_getattr(so->mslot, 1, &isnull);
++				Datum extra_vec_datum = slot_getattr(so->mslot, 3, &isnull);
++
++				result_slot[so->prepared_neighbors].tid = *extra_tid;
++				result_slot[so->prepared_neighbors].distance = (float)DatumGetFloat8(extra_dist);
++
++				Vector* extra_vec = DatumGetVector(extra_vec_datum);
++				result_slot[so->prepared_neighbors].vector_id = akerDefaultHash(
++					(char*)extra_vec->x,
++					(size_t)(VARSIZE_ANY_EXHDR(extra_vec) - 4));
++				so->prepared_neighbors++;
++			}
++
++			char** vector_ref_list =
++				(char**)MemoryContextAlloc(so->tmpCtx, sizeof(char*) * (size_t)so->prepared_neighbors);
++			const size_t payload_bytes = ak_cache->parameter.vector_format.vector_in_bytes;
++
++			for (int i = 0; i < so->prepared_neighbors; i++)
++			{
++				char* payload = (char*)MemoryContextAlloc(so->tmpCtx, payload_bytes);
++				memset(payload, 0, payload_bytes);
++				memcpy(payload, &result_slot[i], sizeof(struct AkResult));
++
++				vector_ref_list[i] = akerCreateVectorSlot(
++					result_slot[i].vector_id,
++					payload_bytes,
++					payload,
++					0,
++					0,
++					result_slot[i].distance);
++
++				akerSetDistanceForVectorSlot(vector_ref_list[i], result_slot[i].distance);
++			}
++
++			char* cache_entry = akerCreateCacheEntry(
++				ak_cache,
++				so->ak_query_vector_slot,
++				(size_t)so->prepared_neighbors,
++				vector_ref_list);
++
++			const bool inserted = akerInsertCacheEntry(
++				ak_cache,
++				so->ak_query_id,
++				cache_entry,
++				so->ak_query_vector_view);
++
++			/* Destroy ephemeral VectorSlots created for insertion (avoid leaks). */
++			for (int i = 0; i < so->prepared_neighbors; i++)
++				akerDestroyVectorSlot(vector_ref_list[i]);
++
++			if (!inserted)
++				akerDestroyCacheEntry(cache_entry);
++		}
++	}
++
+ 	scan->xs_heaptid = *heaptid;
+ 	scan->xs_recheck = false;
+ 	scan->xs_recheckorderby = false;
+@@ -396,6 +726,36 @@ ivfflatendscan(IndexScanDesc scan)
+ {
+ 	IvfflatScanOpaque so = (IvfflatScanOpaque) scan->opaque;
+ 
++	/* Trigger write-log slow-path processing at scan end (legacy behavior). */
++	if (ak_cache != NULL)
++		akerProcessWriteLogEntries(ak_cache, akDistanceFunction, akResultConversionFunction);
++
++	ak_requests_processed++;
++
++	/* Mixed workload helpers */
++	if (so->iftd != NULL)
++	{
++		table_index_fetch_end(so->iftd);
++		so->iftd = NULL;
++	}
++	if (so->valslot != NULL)
++	{
++		ExecDropSingleTupleTableSlot(so->valslot);
++		so->valslot = NULL;
++	}
++
++	/* Free per-scan Aker wrappers allocated with `new`. */
++	if (so->ak_query_vector_view != NULL)
++	{
++		akerDestroyVectorView(so->ak_query_vector_view);
++		so->ak_query_vector_view = NULL;
++	}
++	if (so->ak_query_vector_slot != NULL)
++	{
++		akerDestroyVectorSlot(so->ak_query_vector_slot);
++		so->ak_query_vector_slot = NULL;
++	}
++
+ 	/* Free any temporary files */
+ 	tuplesort_end(so->sortstate);
+ 
+diff --git a/src/vector.c b/src/vector.c
+index a5b2aac..5f25a77 100644
+--- a/src/vector.c
++++ b/src/vector.c
+@@ -22,6 +22,9 @@
+ #include "utils/numeric.h"
+ #include "vector.h"
+ 
++/* Aker integration (legacy patch) */
++#include "ak_pgvector.h"
++
+ #if PG_VERSION_NUM >= 160000
+ #include "varatt.h"
+ #endif
+@@ -48,6 +51,14 @@ _PG_init(void)
+ 	HalfvecInit();
+ 	HnswInit();
+ 	IvfflatInit();
++
++	/*
++	 * Aker integration follows the legacy patch patch behavior:
++	 * - Initialize once per backend process from AKER_CONFIG_PATH
++	 * - Register an exit hook to export traces
++	 */
++	akInitFromEnv();
++	akRegisterExitHook();
+ }
+ 
+ /*

@@ -1,0 +1,22 @@
+# syntax=docker/dockerfile:1
+#
+# Vanilla image:
+# - PostgreSQL 16.2 (built from the official source tarball via the base image)
+# - pgvector v0.8.0 installed from the upstream Git repository (no patch applied)
+#
+
+ARG BASE_IMAGE=aker_pg16_base:16
+FROM ${BASE_IMAGE}
+
+# Use bash for RUN steps so 'set -euo pipefail' works reliably.
+SHELL ["/bin/bash", "-c"]
+
+ARG PGVECTOR_DIR=/opt/src/pgvector
+ARG PG_CONFIG=/usr/local/pgsql/bin/pg_config
+
+# Build and install pgvector v0.8.0 from the upstream repository.
+RUN set -euo pipefail; \
+    git clone --branch v0.8.0 --depth 1 https://github.com/pgvector/pgvector.git "${PGVECTOR_DIR}" && \
+    cd "${PGVECTOR_DIR}" && \
+    make -j"$(nproc)" PG_CONFIG="${PG_CONFIG}" && \
+    make PG_CONFIG="${PG_CONFIG}" install

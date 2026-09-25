@@ -1,0 +1,365 @@
+% =====================================================================
+% DRAFT: Positioning section for QVCache vs. result-materialized caches
+% (Aker, Proximity, Potluck, GPTCache).
+%
+% Suggested placement: new Section 3 ("The Design Space of Approximate
+% Caches for Vector Search"), immediately before the current Solution
+% Overview, with the short related-work paragraph at the end folded into
+% Section 7.
+%
+% Claims marked [VERIFY] are deductions from published algorithms and
+% from the Aker reference implementation; they must be backed by a
+% measurement before submission. See notes at the end of the file.
+% =====================================================================
+
+\section{The Design Space of Approximate Caches for Vector Search}
+\label{sec:design-space}
+
+Prior work distinguishes \emph{traversal-centric} caches, which retain
+index structures and vectors touched during ANN traversal, from
+\emph{result-centric} caches, which retain the outcomes of past
+queries~\cite{aker}. This distinction captures \emph{what} is stored,
+but it obscures a second choice that we argue is more consequential:
+given that a cache stores the outcomes of past queries, does it store
+those outcomes as \emph{materialized answers} or as \emph{materialized
+data}?
+
+We therefore refine the taxonomy. Let $P \subset \mathbb{R}^d$ be the
+indexed collection and let $q_1,\dots,q_N$ be the queries a cache has
+observed, with $A_i = \mathrm{kNN}_P(q_i)$ the top-$k$ each returned.
+
+\begin{itemize}
+  \item A \textbf{result-materialized} cache stores the pairs
+        $(q_i, A_i)$ and answers a new query $q$ by \emph{selecting}
+        one $A_i$ for reuse. Aker~\cite{aker}, Proximity~\cite{proximity},
+        Potluck~\cite{potluck}, and GPTCache~\cite{gptcache} are all of
+        this form.
+  \item A \textbf{data-materialized} cache stores the union
+        $S = \bigcup_i A_i \subseteq P$ in a searchable index and answers
+        $q$ by \emph{recomputing} $\mathrm{kNN}_S(q)$. QVCache is of this
+        form.
+\end{itemize}
+
+Both designs store the same information: after the same query sequence,
+the vector content of $S$ and of a result-materialized cache's result
+pool are identical up to eviction policy. They differ only in the
+\emph{access path} they provide over that content --- selection versus
+search. This section shows that this single difference determines the
+reuse geometry a cache can exploit (\S\ref{sec:ds-geometry}), the
+information its hit predicate can observe (\S\ref{sec:ds-predicate}),
+and the cost of maintaining it under updates
+(\S\ref{sec:ds-updates}). \S\ref{sec:ds-limits} states the regimes in
+which result-materialization remains preferable.
+
+% ---------------------------------------------------------------------
+\subsection{Reuse Geometry: Atomic versus Compositional}
+\label{sec:ds-geometry}
+
+Write $r_j(q)$ for the distance from $q$ to its $j$-th nearest neighbor
+in $P$, so that the exact answer to $q$ is contained in the ball
+$B(q, r_k(q))$.
+
+\paragraph{Result-materialized reuse is atomic.}
+A result-materialized cache admits $q$ when $q$ lies within a reuse
+radius $\tau_i$ of some cached query, and then returns $A_i$ unchanged.
+Its servable region in query space is therefore a union of balls
+centered on \emph{previously issued queries},
+\begin{equation}
+  \mathcal{C}_{\mathrm{res}} \;=\; \bigcup_{i=1}^{N} B(q_i, \tau_i),
+  \label{eq:cov-res}
+\end{equation}
+and its answer space is the finite set $\{A_1,\dots,A_N\}$: over the
+lifetime of the cache, at most $N$ distinct responses are reachable.
+The radii in \eqref{eq:cov-res} are necessarily small. Aker initializes
+$\tau_q$ to a quarter of the distance from $q$ to the nearest member of
+its own cached result and caps it above by that distance, so
+$\tau_i = \Theta(r_1(q_i))$.
+
+\paragraph{Data-materialized reuse is compositional.}
+A data-materialized cache evaluates $\mathrm{kNN}_S(q)$ at query time.
+Its answer space is every $k$-subset of $S$, and its servable region is
+the set of queries for which $S$ is locally an adequate surrogate for
+$P$,
+\begin{equation}
+  \mathcal{C}_{\mathrm{data}} \;\approx\;
+  \bigl\{\, q \;:\; r^{S}_k(q) \le (1{+}D)\,\theta[k][R(q)] \,\bigr\},
+  \label{eq:cov-data}
+\end{equation}
+which, because $S \supseteq \bigcup_i \bigl(P \cap B(q_i, r_k(q_i))\bigr)$,
+is approximately a neighborhood of the union of past \emph{result}
+balls rather than of past query points.
+
+\paragraph{Two consequences.}
+First, the governing radius differs: \eqref{eq:cov-res} is built from
+balls of radius $\Theta(r_1)$ and \eqref{eq:cov-data} from balls of
+radius $r_k$. Because distances concentrate in high dimensions, the
+ratio $r_k/r_1$ is modest, and combined with the constant-factor
+conservatism above the radius ratio is a single-digit number. Coverage,
+however, is a volume, so a single-digit radius ratio corresponds to a
+ratio of order $c^d$ in covered space. At $d \ge 100$ the union in
+\eqref{eq:cov-res} is, for practical purposes, a set of isolated
+points.
+
+Second, and more fundamentally, the balls in \eqref{eq:cov-data}
+\emph{compose} and those in \eqref{eq:cov-res} do not. Consider two
+cached queries separated by $3\tau$ and a new query $q$ at their
+midpoint. A result-materialized cache misses, because $q$ lies outside
+both balls --- yet $A_1 \cup A_2$ may contain the exact
+$\mathrm{kNN}_P(q)$, and those vectors are \emph{already resident in the
+cache}. The limitation is not what the cache stores but that its access
+path exposes one frozen list at a time. A data-materialized cache
+reaches the same vectors by construction, and can return a $k$-set
+assembled from the contributions of many past misses --- a set that no
+single previous query ever returned.
+
+This yields two testable predictions. Because the per-miss covered ball
+has radius $r_k$ for data-materialized caches and $\Theta(r_1)$ for
+result-materialized ones, the advantage should \emph{grow with $k$};
+this is consistent with Figure~\ref{fig:varying-k}, where QVCache's
+latency reduction increases with $k$. And because compositional reuse
+requires only that the workload's queries draw their neighbors from a
+shared region of $P$, not that individual queries recur, it should
+persist where pairwise query similarity vanishes. Section~\ref{sec:noise}
+confirms this: at a perturbation ratio of $\eta = 0.6$, where perturbed
+queries share \emph{no} top-$k$ neighbors pairwise, QVCache still
+sustains a hit ratio near $0.75$. Under \eqref{eq:cov-res} this regime
+admits essentially no approximate hits, since
+$d(q,q') \gtrsim r_k > r_1 > \tau$ for nearly every pair.
+
+% ---------------------------------------------------------------------
+\subsection{What the Hit Predicate Can Observe}
+\label{sec:ds-predicate}
+
+A cache must decide whether a candidate answer is good enough before
+returning it. The two designs differ in what evidence is available at
+that moment.
+
+Because a result-materialized cache holds a frozen list, it cannot
+assess the quality of the answer it is about to return with respect to
+the incoming query; it can only measure how far that query has moved
+from the one that produced the list. Its predicate is thus a test on a
+\emph{proxy}, $d(q,q_i) \le \tau_i$. A data-materialized cache computes
+$\mathrm{kNN}_S(q)$ first and tests the realized quantity,
+$r^{S}_k(q)$, directly against a learned estimate of $r^{P}_k(q)$. Query
+displacement is a conservative sufficient condition for answer quality,
+but the converse fails routinely: many queries far from every $q_i$
+nonetheless admit excellent cached answers. Consequently
+\eqref{eq:cov-res} is an inner approximation of the true adequacy
+region, and it is an inner approximation of the wrong shape, since the
+adequacy region is not centered on past queries at all.
+
+\paragraph{The adaptation signal.}
+This asymmetry propagates into how each design learns its threshold.
+QVCache updates $\theta[k][R]$ from $d_{\mathrm{backend}}[k]$, a
+measurement of the quantity it is trying to estimate, obtained from the
+backend on every cache miss (Algorithm~\ref{alg:learn}). The signal is
+\emph{countercyclical}: it is most abundant precisely when the cache is
+least effective, so the control loop cannot starve, and it requires only
+that queries revisit the same region --- not that any query recur.
+
+Aker instead adapts $\tau_q$ from the \emph{hit type}: it multiplies
+$\tau_q$ by $\alpha_L = 1.1$ on an equality hit and by
+$\alpha_T = 0.25$ on an approximate hit~\cite{aker}. Hit type is not a
+measurement of accuracy; no ground-truth comparison is performed on
+either branch. (Potluck's dropout mechanism~\cite{potluck}, by contrast,
+does verify against the backend, at the cost of forced misses.) Two
+properties follow. Sustaining a given $\tau_q$ requires
+$\ln(1/\alpha_T)/\ln(\alpha_L) \approx 14.5$ equality hits per
+approximate hit. And in the reference implementation, only a
+\emph{bit-exact} repeat of a representative query loosens the
+threshold; a repeat of a query previously served approximately is
+resolved through an alias entry and contributes no loosening
+signal.\,[VERIFY]
+
+In workloads whose query vocabulary is effectively unbounded --- the
+regime that motivates similarity caching in the first place, since
+distinct user inputs yield distinct embeddings
+(\S\ref{sec:workload-characteristics}) --- equality hits are rare, and
+$\tau_q$ therefore decays monotonically: from $\texttt{minD}/4$ to
+$\texttt{minD}/16$ after one approximate hit and to $\texttt{minD}/64$
+after two, with no lower bound. Adaptation then degenerates into a
+monotonically shrinking fraction of the local nearest-neighbor
+distance, and the density-awareness of the mechanism reduces to the
+local scaling already present in its initialization.
+
+\paragraph{On evaluation regimes.}
+This effect is invisible under workloads with a small finite query
+vocabulary. Aker's \textsc{simZipf} generator draws each request
+uniformly from a pre-generated group of $50$ variants per base query, so
+a frequently accessed group repeats each of its members many times, and
+the authors report that equality hits dominate in their
+evaluation~\cite{aker}. Because equality hits are by construction free
+of reuse error, this regime is favorable to hit-type adaptation on both
+the hit-ratio and the recall axis. We therefore evaluate the
+complementary regime as well, treating vocabulary size as an explicit
+workload parameter (\S\ref{sec:vocab-sweep}): our generator
+synthesizes fresh perturbed queries rather than resampling a fixed pool,
+so no two requests are identical.
+
+% ---------------------------------------------------------------------
+\subsection{Maintenance Under Updates}
+\label{sec:ds-updates}
+
+The two designs also diverge sharply once the underlying collection
+changes, and again the divergence is a consequence of the access path
+rather than of any particular refresh algorithm.
+
+\paragraph{Refresh cost is a product versus a sum.}
+In a result-materialized cache each frozen list must be repaired
+independently, so propagating $M$ insertions to $N$ cached queries is
+$O(MN)$ distance evaluations in the worst case. Aker manages this cost
+by deferring most of it: a fast path repairs the single entry nearest to
+the inserted vector, and a slow path advances one entry at a time
+through a batch of $B$ insert-log records, gated on a global risk
+score~\cite{aker}. Full propagation of one insertion therefore requires
+$O(N)$ slow-path invocations, is conditional on the risk score
+exceeding its threshold, and pins insert-log memory behind whichever
+entry lags furthest. In a data-materialized cache an insertion is a
+single index insertion; total work is $O(M)$, independent of how many
+queries the cache has served.
+
+\paragraph{Visibility scope.}
+The scopes also differ. Repairing a frozen list makes the new vector
+available only to queries near that one cached query; inserting into $S$
+makes it available to \emph{every} subsequent query, including queries
+with no similar predecessor in the cache. We report this as \emph{insert
+visibility lag}: the interval between a committed backend insertion and
+the point at which the cache would return the new vector to a query
+whose exact top-$k$ contains it.
+
+\paragraph{Deletions.}
+Under deletions, a result-materialized cache faces a structural cliff:
+removing one vector shortens every list that references it, and any list
+left with fewer than $k$ valid members must be invalidated wholesale.
+Aker mitigates this by storing $\Delta$ reserve neighbors per entry,
+which consumes pool budget and so reduces the number of cached entries
+--- a trade-off it cannot escape. A data-materialized cache has no
+entries to invalidate. Deleting a cached vector removes one node from a
+graph over $|S|$ nodes, and since graph search already maintains a
+candidate pool of size $L \ge k$, the top-$k$ is backfilled from the
+surviving cached vectors at no additional memory cost; the effective
+reserve is $L-k$ rather than a provisioned $\Delta$. Degradation is
+proportional to the fraction of cached vectors deleted rather than
+discontinuous in it.
+
+\paragraph{A stronger consistency model.}
+Aker's \emph{del-consistency} pairs validity ($c_t \subseteq V_t$,
+$|c_t| = k$) with \emph{relaxed visibility}, which places no bound on
+insertion staleness~\cite{aker}. We argue that relaxed visibility is not
+a design preference but the strongest guarantee a result-materialized
+cache can afford, since bounding insertion staleness there requires
+paying the $O(MN)$ product. Data-materialization permits a strictly
+stronger model, which we call \emph{live-consistency}:
+
+\begin{description}
+  \item[L1 (Validity).] At any time $t$ a cache hit returns only live
+    vectors, and returns $k$ of them: $c_t \subseteq V_t$,
+    $|c_t| = k$.
+  \item[L2 (Region freshness).] If $v$ is inserted at $t_0$ into a
+    region that is active at $t_0$, then within a bounded admission
+    delay $\delta$ --- one index insertion --- $v$ is visible to
+    \emph{all} queries in that region for as long as it remains
+    resident.
+  \item[L3 (Fail-to-miss).] Whenever freshness cannot be established
+    for a region, queries in that region degrade to a cache
+    \emph{miss}, never to a stale hit.
+\end{description}
+
+L3 is what decouples accuracy from update rate. Under
+del-consistency, refresh lag manifests as a stale answer, so recall is a
+function of the update rate; under live-consistency it manifests as a
+backend query, so only the hit ratio is. Moreover, given L1 and L2, a
+cache hit returns exactly the top-$k$ that the backend would return over
+the live set restricted to $S$ --- and therefore the recall analysis of
+\S\ref{sec:hit-miss}, which concerns the quality of $\theta$ as an
+estimator of $r^P_k$, carries over unchanged to the dynamic setting.
+Updates do not enter the recall argument at all.
+
+% ---------------------------------------------------------------------
+\subsection{When Result-Materialization Is Preferable}
+\label{sec:ds-limits}
+
+The comparison is not uniformly favorable, and three regimes favor
+result-materialization.
+
+\emph{Lookup cost.} Selection is $O(1)$: an equality hit is a hash
+probe. Composition requires a graph traversal, $O(\log|S|)$. Under
+workloads dominated by exact query repetition, a result-materialized
+cache attains lower per-hit latency, and its query lookup table and
+alias entries are precisely the right design for that regime. QVCache
+buys a larger servable region at the price of a more expensive lookup,
+a trade that is favorable when backend search costs milliseconds and
+unfavorable when it does not.
+
+\emph{Memory per cached vector.} A data-materialized cache stores a
+proximity graph over $S$, whose edges cost several hundred bytes per
+vector, whereas a result-materialized cache stores raw vectors with
+small per-entry metadata and indexes only cache \emph{entries}. The net
+comparison depends on $d$, $k$, $\Delta$, and the degree of result
+sharing across entries, and is not favorable \emph{a priori}; we
+measure it in \S\ref{sec:memory}.
+
+\emph{Estimator quality.} Compositional reuse rests on $\theta[k][R]$
+being an adequate estimate of $r^P_k$ throughout region $R$. Where a
+region straddles both dense and sparse structure, $\theta$ is
+overestimated on the dense side and hits are admitted whose cached
+$k$-set is not the exact one. A result-materialized cache's
+conservatism instead errs toward misses. QVCache therefore exchanges a
+small, safe servable region for a near-maximal, estimator-dependent
+one, and the granularity parameters $n_{\text{buckets}}$ and
+$d_{\text{reduced}}$ govern that exchange
+(\S\ref{sec:sensitivity-partitioning}).
+
+Finally, both designs bound visibility by residency: eviction can
+remove a vector that was previously visible. L2 is accordingly stated
+as holding while $v$ remains resident.
+
+% =====================================================================
+% Short paragraph to fold into Section 7 (Related Work).
+% =====================================================================
+
+\paragraph{Approximate caches for vector search.}
+Proximity~\cite{proximity} reuses cached results under a fixed global
+similarity threshold; Potluck~\cite{potluck} tunes a global threshold at
+runtime by probabilistically forcing misses and comparing against the
+engine's output; GPTCache~\cite{gptcache} applies the same idea to LLM
+prompts. Aker~\cite{aker} advances this line in two directions,
+replacing the global threshold with a per-cached-query radius adapted
+from observed hit types, and introducing del-consistency together with a
+refresh pipeline that applies deletions eagerly and insertions lazily.
+QVCache is complementary in mechanism but differs in kind: all of these
+systems materialize \emph{answers} and reuse them by selection, whereas
+QVCache materializes the retrieved \emph{data} and reuses it by search.
+As \S\ref{sec:design-space} develops, this is what lets QVCache compose
+a top-$k$ across many past misses, supervise its threshold with backend
+distances rather than hit types, and reduce cache refresh to index
+maintenance.
+
+% =====================================================================
+% NOTES BEFORE SUBMISSION
+%
+% [VERIFY] 1. The claim that only bit-exact repeats of a representative
+%   query loosen tau_q is read from Aker's reference implementation
+%   (src/core/ak_anns_cache_similarity_engine.cc: the alpha_loosen update
+%   is guarded by !linked_hit; the alpha_tighten update fires on the
+%   approximate-filter path). Confirm against the released version you
+%   cite, and prefer citing observed behavior over source lines.
+%
+% [VERIFY] 2. The tau_q decay dynamics are deduced from the published
+%   update rule and defaults, not measured. Instrument tau_q over a
+%   unique-query workload and report its distribution over time; a
+%   histogram collapsing toward zero makes the argument unarguable and
+%   removes any reliance on reading their code.
+%
+% [MEASURE] 3. Sec. ds-limits promises memory numbers. Do not claim a
+%   memory win before measuring it -- graph edges plausibly make
+%   QVCache more expensive per cached vector.
+%
+% [FIGURE MAP]
+%   Sec. ds-geometry   -> existing varying-k figure; existing eta sweep.
+%   Sec. ds-predicate  -> NEW vocabulary-size sweep; NEW tau_q histogram.
+%   Sec. ds-updates    -> NEW hit ratio + recall vs deletion rate;
+%                         NEW insert visibility lag; NEW per-update
+%                         cache-side overhead; NEW threads vs QPS
+%                         under a concurrent update stream.
+% =====================================================================

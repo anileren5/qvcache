@@ -1,0 +1,18 @@
+# Keep Docker build context small.
+
+# Build outputs
+build/
+**/build/
+
+# Benchmark runtime artifacts
+pgvector-bench/output/
+pgvector-bench/datastore/
+pgvector-bench/dataset/
+
+# Python caches
+**/__pycache__/
+**/*.pyc
+
+# Git metadata
+.git/
+
