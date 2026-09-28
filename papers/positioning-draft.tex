@@ -272,8 +272,98 @@ backend query, so only the hit ratio is. Moreover, given L1 and L2, a
 cache hit returns exactly the top-$k$ that the backend would return over
 the live set restricted to $S$ --- and therefore the recall analysis of
 \S\ref{sec:hit-miss}, which concerns the quality of $\theta$ as an
-estimator of $r^P_k$, carries over unchanged to the dynamic setting.
-Updates do not enter the recall argument at all.
+estimator of $r^P_k$, carries over unchanged to the dynamic setting
+\emph{once L3 holds}. The write-path rule below is how L3 is
+implemented; it is not a second hit test.
+
+\paragraph{Realizing L1--L3.}
+Write $V_t$ for the live collection at time $t$ and
+$S_t\subseteq V_t$ for the live vectors resident in the mini-indexes
+(tombstones already excluded). Let \(R:\mathbb{R}^d\to\{0,\ldots,B{-}1\}^{d'}\)
+be the regional key (PCA to \(d'{=}16\), \(B{=}8\) bins) and let
+\(\theta_t[R]\) be the learned estimate of \(r^{V}_k\) for queries with
+that key. A query \(q\) is a hit iff \(S_t\) returns \(k\) live ids and
+\(r^{S_t}_k(q)\le(1{+}D)\,\theta_t[R(q)]\). A hit is
+\emph{stale} when
+\(\mathrm{kNN}_{S_t}(q)\ne\mathrm{kNN}_{V_t}(q)\). L3 is exactly the
+requirement that stale hits do not occur.
+
+Axiom L1 is eager: a delete of \(v\) tombstones \(v\) in every shard
+before the next search, so a hit cannot return a dead id. Axiom L2 is
+write-path admission when \(S\) has a free slot --- one index insertion,
+then compositional visibility: any later \(\mathrm{kNN}_{S}(q)\) may
+include \(v\), not only queries near the writer. Writes never evict a
+shard to make room; if \(S\) is full, L2 is deferred to the next miss in
+that region (miss-admit), rather than destroying unrelated
+neighborhoods.
+
+Axiom L3 cannot inspect \(\mathrm{kNN}_{V_t}(q)\) at write time. A
+write of \(v\) at \(t_0\) can stale only queries whose live top-$k$
+contains \(v\) (insert) or contained \(v\) (delete). Call that
+\emph{influence set}
+\begin{equation}
+  \mathcal{I}(v)
+  \;=\;
+  \bigl\{\, R(q) \;:\;
+    v\in\mathrm{kNN}_{V_{t_0}}(q)
+    \;\text{or}\;
+    v\in\mathrm{kNN}_{V_{t_0^-}}(q)
+  \,\bigr\}.
+  \label{eq:influence}
+\end{equation}
+\(\mathcal{I}(v)\) is not observable without a query log. The
+implementation replaces it by a locality cover on the region code. Let
+\(B_1(R(v),r)\) be the \(\ell_1\) ball of Manhattan radius \(r\) on the
+\(d'\)-byte bucket key (the write radius; not to be confused with
+axiom~L1). The working hypothesis is that \(k\)NN relationships are
+locally Lipschitz in this code: there exists a small \(r_\star\) such
+that \(\mathcal{I}(v)\subseteq B_1(R(v),r_\star)\) for writes that
+matter. Then, for every \emph{already learned} cell
+\(R\in B_1(R(v),r)\),
+\begin{equation}
+  \theta[R] \;\leftarrow\; \alpha\cdot\theta[R],
+  \qquad \alpha\in(0,1),
+  \label{eq:theta-penalty}
+\end{equation}
+once, until a miss EMA-updates that cell (a saturating freshness bit).
+Search-only never applies \eqref{eq:theta-penalty}; the hit formula
+itself is unchanged.
+
+Why this is fail-to-miss, not a new predicate. An insert of a closer
+neighbor \emph{decreases} \(r^{V}_k\) while \(r^{S}_k\) stays at the
+pre-write value if \(v\notin S\) or is poorly connected. The old
+\(\theta\) still licenses \(r^{S}_k\le\theta\), which is a stale hit.
+Contracting \(\theta\) shrinks the servable set
+\eqref{eq:cov-data} in every influenced cell, so those queries miss,
+the backend observes the live \(d_k\), and the EMA restores a fresh
+estimate. A delete is dual: L1 already hides \(v\); the hole is
+backfilled from the surviving graph (\(L-k\) implicit reserve), which
+can still satisfy the old \(\theta\) with the wrong \(k\)-set.
+\eqref{eq:theta-penalty} removes that slack.
+
+Two parameters govern the cover, not the model. Radius \(r\) is the
+completeness of \(\widehat{\mathcal{I}}(v)=B_1(R(v),r)\) as a
+substitute for \eqref{eq:influence}: \(r{=}0\) (exact cell of \(v\))
+under-covers, so L3 fails and hit recall collapses after writes;
+large \(r\) over-covers and L3 fires on cells that were never
+influenced (a miss tax, not a recall bug). The factor \(\alpha\) is
+how hard the fail-to-miss is: \(\alpha{=}1\) is a no-op;
+\(\alpha\to 0\) is erasure of \(\theta\) (the prefix wipe). Saturating
+\(\alpha\) is required by the model: L3 asks for one loss of
+freshness, not \(\theta\to 0\). After a miss, \(\theta\) is again an
+estimate of live \(r^{V}_k\) and the cell is trusted until the next
+write.
+
+Under a cover with \(r\ge r_\star\) and \(\alpha\) small enough that
+\(\alpha\,\theta[R] < r^{S}_k(q)\) for every stale \(q\) in those
+cells, \eqref{eq:theta-penalty} implements L3 and the recall argument
+is independent of the update rate, as claimed above. Finite \(r\) and
+\(\alpha{=}0.8\) are a tunable inner approximation of that cover, not
+a second consistency model. Empirically, \(r{=}2\) on the 16-D code
+recovers hit recall \(\approx 0.91\) after a 5\% insert / 5\% delete
+refresh, versus \(\approx 0.80\) at \(r{=}0\), while penalizing
+\(\approx 19\)k of \(60\)k learned cells rather than the whole
+map. The remaining error is uncovered influence, not a hole in L1.
 
 % ---------------------------------------------------------------------
 \subsection{When Result-Materialization Is Preferable}

@@ -17,8 +17,11 @@ InsertThreadPool<T, TagT>::InsertThreadPool(size_t thread_count, TaskFn task_fn,
                     if (stop && tasks.empty()) return;
                     task = std::move(tasks.front());
                     tasks.pop();
+                    inflight.fetch_add(1, std::memory_order_relaxed);
                 }
                 task();
+                inflight.fetch_sub(1, std::memory_order_relaxed);
+                idle_cv.notify_all();
             }
         });
     }
@@ -52,6 +55,14 @@ void InsertThreadPool<T, TagT>::submit(std::unique_ptr<diskann::AbstractIndex>& 
         });
     }
     cv.notify_one();
+}
+
+template <typename T, typename TagT>
+void InsertThreadPool<T, TagT>::wait_idle() {
+    std::unique_lock<std::mutex> lock(mtx);
+    idle_cv.wait(lock, [this] {
+        return tasks.empty() && inflight.load(std::memory_order_acquire) == 0;
+    });
 }
 
 template <typename T, typename TagT>

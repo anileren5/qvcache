@@ -1,7 +1,9 @@
 #pragma once
 
-#include <vector>
 #include <cstdint>
+#include <stdexcept>
+#include <string>
+#include <vector>
 
 namespace qvcache
 {
@@ -22,6 +24,21 @@ class BackendInterface
 
     virtual std::vector<std::vector<T>> fetch_vectors_by_ids(
         const std::vector<TagT> &ids) = 0;
+
+    // Aker: insertWriteLog / markDeleted operate on the collection. DiskANN
+    // flash indexes cannot mutate; pgvector can. Default is "not supported".
+    virtual bool supports_updates() const { return false; }
+
+    virtual void insert(TagT id, const T* vector) {
+        (void)id;
+        (void)vector;
+        throw std::runtime_error("backend does not support insert");
+    }
+
+    virtual void remove(TagT id) {
+        (void)id;
+        throw std::runtime_error("backend does not support delete");
+    }
 };
 
 } 

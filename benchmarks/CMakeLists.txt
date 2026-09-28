@@ -107,7 +107,49 @@ if(PostgreSQL_FOUND)
             ${PROJECT_SOURCE_DIR}/external/DiskANN/include
             ${PostgreSQL_INCLUDE_DIRS}
     )
-    message(STATUS "Building qvcache_benchmark_pgvector against ${PostgreSQL_LIBRARIES}")
+    add_executable(qvcache_update_pgvector qvcache/qvcache_update_pgvector.cpp)
+    target_link_libraries(qvcache_update_pgvector
+        PRIVATE
+            greator
+            diskann
+            qvcache
+            TBB::tbb
+            OpenMP::OpenMP_CXX
+            Boost::program_options
+            spdlog::spdlog
+            PostgreSQL::PostgreSQL
+    )
+    target_include_directories(qvcache_update_pgvector
+        PRIVATE
+            ${PROJECT_SOURCE_DIR}/include
+            ${PROJECT_SOURCE_DIR}/backends
+            ${PROJECT_SOURCE_DIR}/backends/Greator/include
+            ${PROJECT_SOURCE_DIR}/external/DiskANN/include
+            ${PROJECT_SOURCE_DIR}/benchmarks
+            ${PostgreSQL_INCLUDE_DIRS}
+    )
+    add_executable(qvcache_refresh_pgvector qvcache/qvcache_refresh_pgvector.cpp)
+    target_link_libraries(qvcache_refresh_pgvector
+        PRIVATE
+            greator
+            diskann
+            qvcache
+            TBB::tbb
+            OpenMP::OpenMP_CXX
+            Boost::program_options
+            spdlog::spdlog
+            PostgreSQL::PostgreSQL
+    )
+    target_include_directories(qvcache_refresh_pgvector
+        PRIVATE
+            ${PROJECT_SOURCE_DIR}/include
+            ${PROJECT_SOURCE_DIR}/backends
+            ${PROJECT_SOURCE_DIR}/backends/Greator/include
+            ${PROJECT_SOURCE_DIR}/external/DiskANN/include
+            ${PROJECT_SOURCE_DIR}/benchmarks
+            ${PostgreSQL_INCLUDE_DIRS}
+    )
+    message(STATUS "Building qvcache_benchmark_pgvector, qvcache_update_pgvector, and qvcache_refresh_pgvector against ${PostgreSQL_LIBRARIES}")
     if(AKER_LIBRARY AND EXISTS "${AKER_ROOT}/inc/ak_anns_cache_c_wrapper.h")
         add_executable(aker_benchmark_pgvector aker/aker_benchmark_pgvector.cpp)
         target_link_libraries(aker_benchmark_pgvector
@@ -135,7 +177,61 @@ if(PostgreSQL_FOUND)
             BUILD_RPATH "${AKER_ROOT}/build/lib;/usr/local/lib;/opt/boost_1_86/lib"
             INSTALL_RPATH "${AKER_ROOT}/build/lib;/usr/local/lib;/opt/boost_1_86/lib"
         )
-        message(STATUS "Aker: building aker_benchmark_pgvector against ${AKER_LIBRARY} + libpq")
+        add_executable(aker_update_pgvector aker/aker_update_pgvector.cpp)
+        target_link_libraries(aker_update_pgvector
+            PRIVATE
+                greator
+                diskann
+                ${AKER_LIBRARY}
+                TBB::tbb
+                OpenMP::OpenMP_CXX
+                Boost::program_options
+                spdlog::spdlog
+                PostgreSQL::PostgreSQL
+        )
+        target_include_directories(aker_update_pgvector
+            PRIVATE
+                ${PROJECT_SOURCE_DIR}/include
+                ${PROJECT_SOURCE_DIR}/backends
+                ${PROJECT_SOURCE_DIR}/backends/Greator/include
+                ${PROJECT_SOURCE_DIR}/external/DiskANN/include
+                ${AKER_ROOT}/inc
+                ${PROJECT_SOURCE_DIR}/benchmarks
+                ${PROJECT_SOURCE_DIR}/benchmarks/aker
+                ${PostgreSQL_INCLUDE_DIRS}
+        )
+        set_target_properties(aker_update_pgvector PROPERTIES
+            BUILD_RPATH "${AKER_ROOT}/build/lib;/usr/local/lib;/opt/boost_1_86/lib"
+            INSTALL_RPATH "${AKER_ROOT}/build/lib;/usr/local/lib;/opt/boost_1_86/lib"
+        )
+        add_executable(aker_refresh_pgvector aker/aker_refresh_pgvector.cpp)
+        target_link_libraries(aker_refresh_pgvector
+            PRIVATE
+                greator
+                diskann
+                ${AKER_LIBRARY}
+                TBB::tbb
+                OpenMP::OpenMP_CXX
+                Boost::program_options
+                spdlog::spdlog
+                PostgreSQL::PostgreSQL
+        )
+        target_include_directories(aker_refresh_pgvector
+            PRIVATE
+                ${PROJECT_SOURCE_DIR}/include
+                ${PROJECT_SOURCE_DIR}/backends
+                ${PROJECT_SOURCE_DIR}/backends/Greator/include
+                ${PROJECT_SOURCE_DIR}/external/DiskANN/include
+                ${AKER_ROOT}/inc
+                ${PROJECT_SOURCE_DIR}/benchmarks
+                ${PROJECT_SOURCE_DIR}/benchmarks/aker
+                ${PostgreSQL_INCLUDE_DIRS}
+        )
+        set_target_properties(aker_refresh_pgvector PROPERTIES
+            BUILD_RPATH "${AKER_ROOT}/build/lib;/usr/local/lib;/opt/boost_1_86/lib"
+            INSTALL_RPATH "${AKER_ROOT}/build/lib;/usr/local/lib;/opt/boost_1_86/lib"
+        )
+        message(STATUS "Aker: building aker_benchmark_pgvector, aker_update_pgvector, and aker_refresh_pgvector against ${AKER_LIBRARY} + libpq")
     endif()
 else()
     message(STATUS "PostgreSQL/libpq not found; skipping qvcache_benchmark_pgvector")

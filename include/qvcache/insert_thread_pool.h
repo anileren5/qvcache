@@ -33,12 +33,17 @@ public:
                 float query_distance = 0.0f,
                 T* query_ptr = nullptr);
 
+    // Block until the miss-admit queue is empty.
+    void wait_idle();
+
 private:
     std::vector<std::thread> workers;
     std::queue<std::function<void()>> tasks;
     std::mutex mtx;
     std::condition_variable cv;
+    std::condition_variable idle_cv;
     std::atomic<bool> stop;
+    std::atomic<size_t> inflight{0};
     TaskFn task_function;
     ThetaUpdateFn theta_update_function;
 };

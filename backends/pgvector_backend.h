@@ -15,9 +15,12 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace qvcache {
@@ -137,17 +140,58 @@ public:
     std::vector<std::vector<T>> fetch_vectors_by_ids(const std::vector<TagT>& ids) override {
         std::vector<std::vector<T>> out;
         out.reserve(ids.size());
-        if (vector_data_ == nullptr) {
-            throw std::runtime_error("PgVectorBackend has no local vectors for fetch_vectors_by_ids");
-        }
         for (TagT id : ids) {
-            std::vector<T> vec(dim_, static_cast<T>(0));
-            if (static_cast<size_t>(id) < num_vectors_) {
-                std::memcpy(vec.data(), vector_data_ + static_cast<size_t>(id) * dim_, dim_ * sizeof(T));
-            }
-            out.push_back(std::move(vec));
+            out.push_back(fetch_one(id));
         }
         return out;
+    }
+
+    bool supports_updates() const override { return true; }
+
+    void insert(TagT id, const T* vector) override {
+        if (vector == nullptr) {
+            throw std::runtime_error("pgvector insert: null vector");
+        }
+        std::vector<T> copy(vector, vector + dim_);
+        {
+            std::lock_guard<std::mutex> lock(overlay_mu_);
+            removed_ids_.erase(id);
+            overlay_[id] = copy;
+        }
+
+        PGconn* c = conn();
+        const std::string id_str = std::to_string(static_cast<uint64_t>(id));
+        const std::string vec_str = format_vector(vector);
+        const std::string sql =
+            "INSERT INTO " + table_name_ + " (id, vector) VALUES ($1::bigint, $2::vector) "
+            "ON CONFLICT (id) DO UPDATE SET vector = EXCLUDED.vector";
+        const char* params[2] = {id_str.c_str(), vec_str.c_str()};
+        PGresult* res = PQexecParams(c, sql.c_str(), 2, nullptr, params, nullptr, nullptr, 0);
+        if (PQresultStatus(res) != PGRES_COMMAND_OK) {
+            std::string err = PQerrorMessage(c);
+            PQclear(res);
+            throw std::runtime_error("pgvector insert failed: " + err);
+        }
+        PQclear(res);
+    }
+
+    void remove(TagT id) override {
+        {
+            std::lock_guard<std::mutex> lock(overlay_mu_);
+            overlay_.erase(id);
+            removed_ids_.insert(id);
+        }
+        PGconn* c = conn();
+        const std::string id_str = std::to_string(static_cast<uint64_t>(id));
+        const std::string sql = "DELETE FROM " + table_name_ + " WHERE id = $1::bigint";
+        const char* params[1] = {id_str.c_str()};
+        PGresult* res = PQexecParams(c, sql.c_str(), 1, nullptr, params, nullptr, nullptr, 0);
+        if (PQresultStatus(res) != PGRES_COMMAND_OK) {
+            std::string err = PQerrorMessage(c);
+            PQclear(res);
+            throw std::runtime_error("pgvector delete failed: " + err);
+        }
+        PQclear(res);
     }
 
 private:
@@ -206,6 +250,64 @@ private:
         return s;
     }
 
+    std::vector<T> fetch_one(TagT id) {
+        {
+            std::lock_guard<std::mutex> lock(overlay_mu_);
+            if (removed_ids_.count(id) != 0) {
+                return std::vector<T>(dim_, static_cast<T>(0));
+            }
+            auto it = overlay_.find(id);
+            if (it != overlay_.end()) {
+                return it->second;
+            }
+        }
+        if (vector_data_ != nullptr && static_cast<size_t>(id) < num_vectors_) {
+            std::vector<T> vec(dim_, static_cast<T>(0));
+            std::memcpy(vec.data(), vector_data_ + static_cast<size_t>(id) * dim_, dim_ * sizeof(T));
+            return vec;
+        }
+        return fetch_one_from_db(id);
+    }
+
+    std::vector<T> fetch_one_from_db(TagT id) {
+        PGconn* c = conn();
+        const std::string id_str = std::to_string(static_cast<uint64_t>(id));
+        const std::string sql = "SELECT vector::text FROM " + table_name_ + " WHERE id = $1::bigint";
+        const char* params[1] = {id_str.c_str()};
+        PGresult* res = PQexecParams(c, sql.c_str(), 1, nullptr, params, nullptr, nullptr, 0);
+        std::vector<T> vec(dim_, static_cast<T>(0));
+        if (PQresultStatus(res) != PGRES_TUPLES_OK || PQntuples(res) < 1) {
+            PQclear(res);
+            return vec;
+        }
+        parse_vector_text(PQgetvalue(res, 0, 0), vec);
+        PQclear(res);
+        return vec;
+    }
+
+    void parse_vector_text(const char* text, std::vector<T>& out) const {
+        if (text == nullptr) {
+            return;
+        }
+        size_t i = 0;
+        const char* p = text;
+        if (*p == '[') {
+            ++p;
+        }
+        while (*p && *p != ']' && i < out.size()) {
+            char* end = nullptr;
+            const double v = std::strtod(p, &end);
+            if (end == p) {
+                break;
+            }
+            out[i++] = static_cast<T>(v);
+            p = end;
+            if (*p == ',') {
+                ++p;
+            }
+        }
+    }
+
     void load_vectors_from_file(const std::string& data_path) {
         std::ifstream in(data_path, std::ios::binary);
         if (!in) {
@@ -237,6 +339,9 @@ private:
     T* vector_data_;
     size_t num_vectors_;
     size_t dim_;
+    std::mutex overlay_mu_;
+    std::unordered_map<TagT, std::vector<T>> overlay_;
+    std::unordered_set<TagT> removed_ids_;
 };
 
 }  // namespace qvcache
