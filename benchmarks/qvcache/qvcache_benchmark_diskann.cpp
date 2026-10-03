@@ -18,6 +18,7 @@
 #include <random>
 #include <numeric>
 #include <cstring>
+#include <sstream>
 
 // Backend header
 #include "greator_backend.h"
@@ -63,21 +64,54 @@ struct RecallHitMetrics {
     size_t cache_hit_count;
 };
 
+std::vector<uint32_t> parse_k_pool(const std::string& spec) {
+    std::vector<uint32_t> pool;
+    std::stringstream ss(spec);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+        if (item.empty()) {
+            continue;
+        }
+        const unsigned long value = std::stoul(item);
+        if (value == 0 || value > std::numeric_limits<uint32_t>::max()) {
+            std::cerr << "k pool values must be positive integers, got '" << item << "'" << std::endl;
+            exit(1);
+        }
+        pool.push_back(static_cast<uint32_t>(value));
+    }
+    if (pool.empty()) {
+        std::cerr << "k pool is empty: '" << spec << "'" << std::endl;
+        exit(1);
+    }
+    return pool;
+}
+
+uint32_t sample_k(std::mt19937& rng, const std::vector<uint32_t>& pool) {
+    std::uniform_int_distribution<size_t> pick(0, pool.size() - 1);
+    return pool[pick(rng)];
+}
+
 template <typename T, typename TagT = uint32_t>
-RecallAllMetrics calculate_recall(size_t K, TagT* groundtruth_ids, std::vector<TagT>& query_result_tags, size_t query_num, size_t groundtruth_dim) {
+RecallAllMetrics calculate_recall(size_t K, TagT* groundtruth_ids, std::vector<TagT>& query_result_tags, size_t query_num, size_t groundtruth_dim,
+                                  const uint32_t* k_per_query = nullptr, uint32_t result_stride = 0) {
+    const uint32_t stride = result_stride == 0 ? static_cast<uint32_t>(K) : result_stride;
     double total_recall = 0.0;
     std::vector<double> recall_by_query;
     const TagT INVALID_ID = std::numeric_limits<TagT>::max();
+    uint32_t logged_k = k_per_query != nullptr ? k_per_query[0] : static_cast<uint32_t>(K);
+    bool mixed_k = false;
     
     for (int32_t i = 0; i < query_num; i++) {
+        const uint32_t ki = k_per_query != nullptr ? k_per_query[i] : static_cast<uint32_t>(K);
+        if (ki != logged_k) mixed_k = true;
         std::set<uint32_t> groundtruth_closest_neighbors;
         std::set<uint32_t> calculated_closest_neighbors;
-        for (int32_t j = 0; j < K; j++) {
+        for (uint32_t j = 0; j < ki; j++) {
             groundtruth_closest_neighbors.insert(*(groundtruth_ids + i * groundtruth_dim + j));
         }
         // Filter out invalid IDs (padded results)
-        for (int32_t j = 0; j < K; j++) {
-            TagT tag = *(query_result_tags.data() + i * K + j);
+        for (uint32_t j = 0; j < ki; j++) {
+            TagT tag = *(query_result_tags.data() + static_cast<size_t>(i) * stride + j);
             if (tag != INVALID_ID) {
                 calculated_closest_neighbors.insert(tag);
             }
@@ -86,7 +120,7 @@ RecallAllMetrics calculate_recall(size_t K, TagT* groundtruth_ids, std::vector<T
         for (uint32_t x : calculated_closest_neighbors) {
             if (groundtruth_closest_neighbors.count(x - 1)) matching_neighbors++;
         }
-        double recall = matching_neighbors / (double)K;
+        double recall = matching_neighbors / (double)ki;
         recall_by_query.push_back(recall);
         total_recall += recall;
     }
@@ -102,7 +136,7 @@ RecallAllMetrics calculate_recall(size_t K, TagT* groundtruth_ids, std::vector<T
     
     RecallAllMetrics metrics;
     metrics.recall_all = average_recall;
-    metrics.K = K;
+    metrics.K = mixed_k ? 0 : logged_k;
     metrics.low_recall_queries = low_recall_count;
     metrics.very_low_recall_queries = very_low_recall_count;
     
@@ -111,21 +145,24 @@ RecallAllMetrics calculate_recall(size_t K, TagT* groundtruth_ids, std::vector<T
 
 template <typename T, typename TagT = uint32_t>
 RecallHitMetrics calculate_hit_recall(size_t K, TagT* groundtruth_ids, std::vector<TagT>& query_result_tags, 
-                         const std::vector<bool>& hit_results, size_t query_num, size_t groundtruth_dim) {
+                         const std::vector<bool>& hit_results, size_t query_num, size_t groundtruth_dim,
+                         const uint32_t* k_per_query = nullptr, uint32_t result_stride = 0) {
+    const uint32_t stride = result_stride == 0 ? static_cast<uint32_t>(K) : result_stride;
     double total_recall = 0.0;
     size_t hit_count = 0;
     const TagT INVALID_ID = std::numeric_limits<TagT>::max();
     
     for (int32_t i = 0; i < query_num; i++) {
         if (hit_results[i]) {
+            const uint32_t ki = k_per_query != nullptr ? k_per_query[i] : static_cast<uint32_t>(K);
             std::set<uint32_t> groundtruth_closest_neighbors;
             std::set<uint32_t> calculated_closest_neighbors;
-            for (int32_t j = 0; j < K; j++) {
+            for (uint32_t j = 0; j < ki; j++) {
                 groundtruth_closest_neighbors.insert(*(groundtruth_ids + i * groundtruth_dim + j));
             }
             // Filter out invalid IDs (padded results)
-            for (int32_t j = 0; j < K; j++) {
-                TagT tag = *(query_result_tags.data() + i * K + j);
+            for (uint32_t j = 0; j < ki; j++) {
+                TagT tag = *(query_result_tags.data() + static_cast<size_t>(i) * stride + j);
                 if (tag != INVALID_ID) {
                     calculated_closest_neighbors.insert(tag);
                 }
@@ -134,7 +171,7 @@ RecallHitMetrics calculate_hit_recall(size_t K, TagT* groundtruth_ids, std::vect
             for (uint32_t x : calculated_closest_neighbors) {
                 if (groundtruth_closest_neighbors.count(x - 1)) matching_neighbors++;
             }
-            double recall = matching_neighbors / (double)K;
+            double recall = matching_neighbors / (double)ki;
             total_recall += recall;
             hit_count++;
         }
@@ -316,9 +353,11 @@ std::pair<std::vector<bool>, HybridMetrics> hybrid_search(
     const T* query, size_t query_num, uint32_t query_aligned_dim,
     uint32_t K, uint32_t L, uint32_t search_threads,
     std::vector<uint32_t>& query_result_tags, std::vector<T *>& res,
-    uint32_t beamwidth, const std::string& data_path
+    uint32_t beamwidth, const std::string& data_path,
+    const uint32_t* k_per_query = nullptr, uint32_t result_stride = 0
 ) {
-    std::vector<float> query_result_dists(K * query_num);
+    const uint32_t stride = result_stride == 0 ? K : result_stride;
+    std::vector<float> query_result_dists(static_cast<size_t>(stride) * query_num);
     greator::QueryStats* stats = new greator::QueryStats[query_num];
     std::vector<double> latencies_ms(query_num, 0.0);
     std::vector<double> miss_penalties_ms(query_num, 0.0);
@@ -333,12 +372,13 @@ std::pair<std::vector<bool>, HybridMetrics> hybrid_search(
     #pragma omp parallel for num_threads((int32_t)search_threads) schedule(dynamic)
     for (size_t i = 0; i < query_num; i++) {
         auto start = std::chrono::high_resolution_clock::now();
+        const uint32_t ki = k_per_query != nullptr ? k_per_query[i] : K;
         bool hit = qvcache.search(
             query + i * query_aligned_dim,
-            K,
-            query_result_tags.data() + i * K,
+            ki,
+            query_result_tags.data() + i * stride,
             res,
-            query_result_dists.data() + i * K,
+            query_result_dists.data() + i * stride,
             stats + i
         );
         hit_results[i] = hit;
@@ -454,7 +494,9 @@ void experiment_benchmark(
     int stride,
     int n_round,
     int report_interval,
-    bool learn_pca_from_queries
+    bool learn_pca_from_queries,
+    int vary_k,
+    const std::vector<uint32_t>& k_pool
 ) {
     if (report_interval <= 0) {
         // Copy 0 is the unperturbed original. Each (split, window visit) uses the next
@@ -516,6 +558,45 @@ void experiment_benchmark(
     diskann::load_aligned_bin<T>(query_path, query, query_num, query_dim, query_aligned_dim);
     std::vector<T *> res = std::vector<T *>();
 
+    std::vector<uint32_t> sampled_k;
+    if (vary_k) {
+        if (report_interval <= 0) {
+            std::cerr << "vary_k samples a k per query on the sequential search workload (report_interval > 0)" << std::endl;
+            exit(1);
+        }
+        const uint32_t k_max = *std::max_element(k_pool.begin(), k_pool.end());
+        if (memory_L < k_max) {
+            std::cerr << "memory_L (" << memory_L << ") must be >= largest k in the pool (" << k_max << ")" << std::endl;
+            exit(1);
+        }
+        if (groundtruth_dim < k_max) {
+            std::cerr << "groundtruth stores " << groundtruth_dim
+                      << " neighbors; the k pool needs at least " << k_max << std::endl;
+            exit(1);
+        }
+        std::mt19937 rng(42);
+        sampled_k.resize(query_num);
+        std::map<uint32_t, size_t> counts;
+        for (uint32_t choice : k_pool) {
+            counts[choice] = 0;
+        }
+        for (size_t i = 0; i < query_num; ++i) {
+            const uint32_t k = sample_k(rng, k_pool);
+            sampled_k[i] = k;
+            counts[k]++;
+        }
+        std::cout << "k = sample_k([";
+        for (size_t i = 0; i < k_pool.size(); ++i) {
+            if (i) std::cout << ", ";
+            std::cout << k_pool[i];
+        }
+        std::cout << "])";
+        for (const auto& entry : counts) {
+            std::cout << "  " << entry.first << ":" << entry.second;
+        }
+        std::cout << std::endl;
+    }
+
     if (report_interval > 0) {
         const size_t interval = static_cast<size_t>(report_interval);
         size_t done = 0;
@@ -526,7 +607,9 @@ void experiment_benchmark(
                      query_num, report_interval);
         while (done < query_num) {
             const size_t n = std::min(interval, query_num - done);
-            std::vector<TagT> query_result_tags(n * K);
+            const uint32_t* batch_k = vary_k ? sampled_k.data() + done : nullptr;
+            const uint32_t stride = vary_k ? *std::max_element(k_pool.begin(), k_pool.end()) : K;
+            std::vector<TagT> query_result_tags(n * stride);
             auto [hit_results, hybrid_metrics] = hybrid_search(
                 qvcache,
                 query + done * query_aligned_dim,
@@ -538,14 +621,16 @@ void experiment_benchmark(
                 query_result_tags,
                 res,
                 beamwidth,
-                data_path
+                data_path,
+                batch_k,
+                stride
             );
             RecallAllMetrics recall_all = calculate_recall<T, TagT>(
                 K, groundtruth_ids + done * groundtruth_dim,
-                query_result_tags, n, groundtruth_dim);
+                query_result_tags, n, groundtruth_dim, batch_k, stride);
             RecallHitMetrics recall_hits = calculate_hit_recall<T, TagT>(
                 K, groundtruth_ids + done * groundtruth_dim,
-                query_result_tags, hit_results, n, groundtruth_dim);
+                query_result_tags, hit_results, n, groundtruth_dim, batch_k, stride);
             cum_hits += hybrid_metrics.hits;
             cum_latency_sum += hybrid_metrics.avg_latency_ms * static_cast<double>(n);
             done += n;
@@ -715,6 +800,8 @@ int main(int argc, char **argv) {
     int n_round;
     int report_interval = 0;
     int learn_pca_from_queries = 0;
+    int vary_k = 0;
+    std::string k_pool_spec = "1,5,10";
     po::options_description desc;
     try {
         po::options_description desc("Allowed options");
@@ -759,7 +846,9 @@ int main(int argc, char **argv) {
             ("stride", po::value<int>(&stride)->required(), "Stride (step size for window advancement)")
             ("n_round", po::value<int>(&n_round)->default_value(1), "Number of times to cycle windows over splits (wrapping)")
             ("report_interval", po::value<int>(&report_interval)->default_value(0), "Aker: if >0, stream queries in file order and log metrics every N queries (skip windows)")
-            ("learn_pca_from_queries", po::value<int>(&learn_pca_from_queries)->default_value(0), "Fit regional PCA on the query file (1) instead of sampled data vectors (0)");
+            ("learn_pca_from_queries", po::value<int>(&learn_pca_from_queries)->default_value(0), "Fit regional PCA on the query file (1) instead of sampled data vectors (0)")
+            ("vary_k", po::value<int>(&vary_k)->default_value(0), "Sample each query k uniformly from --k_pool")
+            ("k_pool", po::value<std::string>(&k_pool_spec)->default_value("1,5,10"), "Comma-separated k values, e.g. 1,5,10");
         po::variables_map vm;
         po::store(po::parse_command_line(argc, argv, desc), vm);
         if (vm.count("help")) {
@@ -828,21 +917,36 @@ int main(int argc, char **argv) {
         "  \"stride\": {},\n"
         "  \"n_round\": {},\n"
         "  \"report_interval\": {},\n"
-        "  \"learn_pca_from_queries\": {}\n"
+        "  \"learn_pca_from_queries\": {},\n"
+        "  \"vary_k\": {}\n"
         "}}",
-        data_type, data_path, query_path, groundtruth_path, disk_index_prefix, R, memory_L, disk_L, K, B, M, build_threads, search_threads, alpha, use_reconstructed_vectors, disk_index_already_built, beamwidth, p, deviation_factor, sector_len, use_regional_theta, pca_dim, buckets_per_dim, memory_index_max_points, max_regions, n_splits, n_split_repeat, n_async_insert_threads, lazy_theta_updates, number_of_mini_indexes, search_mini_indexes_in_parallel, max_search_threads, search_strategy, metric_str, window_size, n_repeat, stride, n_round, report_interval, learn_pca_from_queries);
+        data_type, data_path, query_path, groundtruth_path, disk_index_prefix, R, memory_L, disk_L, K, B, M, build_threads, search_threads, alpha, use_reconstructed_vectors, disk_index_already_built, beamwidth, p, deviation_factor, sector_len, use_regional_theta, pca_dim, buckets_per_dim, memory_index_max_points, max_regions, n_splits, n_split_repeat, n_async_insert_threads, lazy_theta_updates, number_of_mini_indexes, search_mini_indexes_in_parallel, max_search_threads, search_strategy, metric_str, window_size, n_repeat, stride, n_round, report_interval, learn_pca_from_queries, vary_k);
+    std::vector<uint32_t> k_pool;
+    if (vary_k) {
+        try {
+            k_pool = parse_k_pool(k_pool_spec);
+        } catch (const std::exception& ex) {
+            std::cerr << "Bad k pool '" << k_pool_spec << "': " << ex.what() << std::endl;
+            return -1;
+        }
+        const uint32_t k_max = *std::max_element(k_pool.begin(), k_pool.end());
+        if (disk_L < k_max) {
+            std::cerr << "disk_L (" << disk_L << ") must be >= largest k in the pool (" << k_max << ")" << std::endl;
+            return -1;
+        }
+    }
     if (data_type == "float") {
         std::unique_ptr<qvcache::BackendInterface<float, uint32_t>> greator_backend = std::make_unique<qvcache::GreatorBackend<float>>(
             data_path, disk_index_prefix, R, disk_L, B, M, build_threads, disk_index_already_built, beamwidth, metric);
-        experiment_benchmark<float>(data_type, data_path, query_path, groundtruth_path, disk_index_prefix, R, memory_L, K, B, M, alpha, build_threads, search_threads, disk_index_already_built, beamwidth, use_reconstructed_vectors, p, deviation_factor, memory_index_max_points, use_regional_theta, pca_dim, buckets_per_dim, max_regions, n_splits, n_split_repeat, n_async_insert_threads, lazy_theta_updates, number_of_mini_indexes, search_mini_indexes_in_parallel, max_search_threads, search_strategy, metric, std::move(greator_backend), window_size, n_repeat, stride, n_round, report_interval, (bool)learn_pca_from_queries);
+        experiment_benchmark<float>(data_type, data_path, query_path, groundtruth_path, disk_index_prefix, R, memory_L, K, B, M, alpha, build_threads, search_threads, disk_index_already_built, beamwidth, use_reconstructed_vectors, p, deviation_factor, memory_index_max_points, use_regional_theta, pca_dim, buckets_per_dim, max_regions, n_splits, n_split_repeat, n_async_insert_threads, lazy_theta_updates, number_of_mini_indexes, search_mini_indexes_in_parallel, max_search_threads, search_strategy, metric, std::move(greator_backend), window_size, n_repeat, stride, n_round, report_interval, (bool)learn_pca_from_queries, vary_k, k_pool);
     } else if (data_type == "int8") {
         std::unique_ptr<qvcache::BackendInterface<int8_t, uint32_t>> greator_backend = std::make_unique<qvcache::GreatorBackend<int8_t>>(
             data_path, disk_index_prefix, R, disk_L, B, M, build_threads, disk_index_already_built, beamwidth, metric);
-        experiment_benchmark<int8_t>(data_type, data_path, query_path, groundtruth_path, disk_index_prefix, R, memory_L, K, B, M, alpha, build_threads, search_threads, disk_index_already_built, beamwidth, use_reconstructed_vectors, p, deviation_factor, memory_index_max_points, use_regional_theta, pca_dim, buckets_per_dim, max_regions, n_splits, n_split_repeat, n_async_insert_threads, lazy_theta_updates, number_of_mini_indexes, search_mini_indexes_in_parallel, max_search_threads, search_strategy, metric, std::move(greator_backend), window_size, n_repeat, stride, n_round, report_interval, (bool)learn_pca_from_queries);
+        experiment_benchmark<int8_t>(data_type, data_path, query_path, groundtruth_path, disk_index_prefix, R, memory_L, K, B, M, alpha, build_threads, search_threads, disk_index_already_built, beamwidth, use_reconstructed_vectors, p, deviation_factor, memory_index_max_points, use_regional_theta, pca_dim, buckets_per_dim, max_regions, n_splits, n_split_repeat, n_async_insert_threads, lazy_theta_updates, number_of_mini_indexes, search_mini_indexes_in_parallel, max_search_threads, search_strategy, metric, std::move(greator_backend), window_size, n_repeat, stride, n_round, report_interval, (bool)learn_pca_from_queries, vary_k, k_pool);
     } else if (data_type == "uint8") {
         std::unique_ptr<qvcache::BackendInterface<uint8_t, uint32_t>> greator_backend = std::make_unique<qvcache::GreatorBackend<uint8_t>>(
             data_path, disk_index_prefix, R, disk_L, B, M, build_threads, disk_index_already_built, beamwidth, metric);
-        experiment_benchmark<uint8_t>(data_type, data_path, query_path, groundtruth_path, disk_index_prefix, R, memory_L, K, B, M, alpha, build_threads, search_threads, disk_index_already_built, beamwidth, use_reconstructed_vectors, p, deviation_factor, memory_index_max_points, use_regional_theta, pca_dim, buckets_per_dim, max_regions, n_splits, n_split_repeat, n_async_insert_threads, lazy_theta_updates, number_of_mini_indexes, search_mini_indexes_in_parallel, max_search_threads, search_strategy, metric, std::move(greator_backend), window_size, n_repeat, stride, n_round, report_interval, (bool)learn_pca_from_queries);
+        experiment_benchmark<uint8_t>(data_type, data_path, query_path, groundtruth_path, disk_index_prefix, R, memory_L, K, B, M, alpha, build_threads, search_threads, disk_index_already_built, beamwidth, use_reconstructed_vectors, p, deviation_factor, memory_index_max_points, use_regional_theta, pca_dim, buckets_per_dim, max_regions, n_splits, n_split_repeat, n_async_insert_threads, lazy_theta_updates, number_of_mini_indexes, search_mini_indexes_in_parallel, max_search_threads, search_strategy, metric, std::move(greator_backend), window_size, n_repeat, stride, n_round, report_interval, (bool)learn_pca_from_queries, vary_k, k_pool);
     } else {
         std::cerr << "Unsupported data type: " << data_type << std::endl;
     }
