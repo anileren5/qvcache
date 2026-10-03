@@ -40,13 +40,10 @@ namespace qvcache {
         std::unordered_map<RegionKey, std::unordered_map<uint32_t, double>, ArrayHash> region_theta_map;
         // Saturating write penalty: 1 = fully trusted; α after one write.
         std::unordered_map<RegionKey, double, ArrayHash> region_discount_map;
-        // 4-D index for optional region-routing / shard θ reset.
-        std::unordered_map<uint32_t, std::vector<RegionKey>> prefix_members;
         std::mutex region_theta_map_mutex;
         std::list<RegionKey> region_insertion_order;
         size_t max_regions;
         size_t write_l1_radius = 1;
-        static constexpr size_t k_route_dims = 4;
 
         Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> pca_components;
         Eigen::Matrix<T, 1, Eigen::Dynamic> pca_mean;
@@ -225,31 +222,6 @@ namespace qvcache {
             return key;
         }
 
-        size_t max_pack_dims() const {
-            const uint64_t limit = std::numeric_limits<uint32_t>::max();
-            const uint64_t base = std::max<uint64_t>(1, static_cast<uint64_t>(BUCKETS_PER_DIM));
-            uint64_t span = 1;
-            size_t n = 0;
-            while (n < 8 && span <= limit / base) {
-                span *= base;
-                ++n;
-            }
-            return n;
-        }
-
-        uint32_t pack_coarse_key(const RegionKey& key, size_t n_dims) const {
-            const size_t use = std::min(n_dims, std::min(key.size(), max_pack_dims()));
-            uint32_t packed = 0;
-            for (size_t i = 0; i < use; ++i) {
-                packed = packed * static_cast<uint32_t>(BUCKETS_PER_DIM) + static_cast<uint32_t>(key[i]);
-            }
-            return packed;
-        }
-
-        uint32_t compute_coarse_key(const T* vec, size_t n_dims) {
-            return pack_coarse_key(compute_region_key(vec), n_dims);
-        }
-
         double uninitialized_theta() const {
             return (metric == diskann::COSINE) ? -std::numeric_limits<double>::infinity()
                                                : std::numeric_limits<double>::max();
@@ -278,23 +250,6 @@ namespace qvcache {
             return false;
         }
 
-        void index_prefix_locked(const RegionKey& key) {
-            prefix_members[pack_coarse_key(key, k_route_dims)].push_back(key);
-        }
-
-        void unindex_prefix_locked(const RegionKey& key) {
-            const uint32_t pid = pack_coarse_key(key, k_route_dims);
-            auto it = prefix_members.find(pid);
-            if (it == prefix_members.end()) {
-                return;
-            }
-            auto& members = it->second;
-            members.erase(std::remove(members.begin(), members.end(), key), members.end());
-            if (members.empty()) {
-                prefix_members.erase(it);
-            }
-        }
-
         void invalidate_theta(const T* vec, size_t /*n_dims*/) {
             if (vec == nullptr) {
                 return;
@@ -305,21 +260,6 @@ namespace qvcache {
             if (it != region_theta_map.end()) {
                 reset_theta_entry(it->second);
                 region_discount_map[key] = 1.0;
-            }
-        }
-
-        void invalidate_thetas_for_coarse_key(uint32_t coarse, size_t /*n_dims*/) {
-            std::lock_guard<std::mutex> lock(region_theta_map_mutex);
-            auto it = prefix_members.find(coarse);
-            if (it == prefix_members.end()) {
-                return;
-            }
-            for (const auto& fine : it->second) {
-                auto rit = region_theta_map.find(fine);
-                if (rit != region_theta_map.end()) {
-                    reset_theta_entry(rit->second);
-                    region_discount_map[fine] = 1.0;
-                }
             }
         }
 
@@ -385,7 +325,6 @@ namespace qvcache {
                 if (region_theta_map.size() >= max_regions && !region_insertion_order.empty()) {
                     RegionKey oldest_key = region_insertion_order.front();
                     region_insertion_order.pop_front();
-                    unindex_prefix_locked(oldest_key);
                     region_theta_map.erase(oldest_key);
                     region_discount_map.erase(oldest_key);
                 }
@@ -395,7 +334,6 @@ namespace qvcache {
                 region_theta_map[key][10] = init_value;
                 region_theta_map[key][100] = init_value;
                 region_insertion_order.push_back(key);
-                index_prefix_locked(key);
             }
         }
 

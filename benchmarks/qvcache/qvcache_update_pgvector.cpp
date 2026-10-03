@@ -202,10 +202,9 @@ int run_update_bench(
     cache.wait_for_pending_inserts();
     auto t1 = std::chrono::high_resolution_clock::now();
     spdlog::info("{{\"event\": \"update_end\", \"cache\": \"qvcache\", \"elapsed_ms\": {}, "
-                 "\"memory_active_vectors\": {}, \"region_directory_size\": {}}}",
+                 "\"memory_active_vectors\": {}}}",
                  std::chrono::duration<double, std::milli>(t1 - t0).count(),
-                 cache.get_number_of_vectors_in_memory_index(),
-                 cache.get_region_directory_size());
+                 cache.get_number_of_vectors_in_memory_index());
 
     diskann::aligned_free(base);
     diskann::aligned_free(queries);

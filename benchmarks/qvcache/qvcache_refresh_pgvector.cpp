@@ -1,6 +1,7 @@
 // Aker §5.4 refresh stress-test on QVCache + pgvector (SPACEV-1M, simZipf 0.99).
 // Warmup is search-only. Re-search recall uses an in-memory exact top-k
-// over base + inserts − deletes. Existing GT files are not touched.
+// over base + inserts − deletes (insert_frac=0 is delete-only). Existing
+// GT files are not touched.
 
 #include <algorithm>
 #include <chrono>
@@ -99,10 +100,10 @@ int run_refresh_bench(
 
     spdlog::info("{{\"event\": \"refresh_start\", \"cache\": \"qvcache\", "
                  "\"n_base\": {}, \"n_queries\": {}, \"n_warmup\": {}, \"n_eval\": {}, "
-                 "\"insert_frac\": {}, \"n_insert\": {}, \"delete_rate\": {}, \"K\": {}, "
+                 "\"insert_frac\": {}, \"n_insert\": {}, \"delete_only\": {}, \"delete_rate\": {}, \"K\": {}, "
                  "\"memory_index_max_points\": {}, \"write_theta_discount\": {}, "
                  "\"write_l1_radius\": {}}}",
-                 n_base, nq, n_warmup, n_eval, insert_frac, n_insert, delete_rate, K,
+                 n_base, nq, n_warmup, n_eval, insert_frac, n_insert, n_insert == 0, delete_rate, K,
                  memory_index_max_points, cache.get_write_theta_discount(),
                  cache.get_write_l1_radius());
 
@@ -111,7 +112,6 @@ int run_refresh_bench(
         snap.memory_active_vectors = cache.get_number_of_vectors_in_memory_index();
         snap.memory_max_points = cache.get_number_of_max_points_in_memory_index();
         snap.pca_active_regions = cache.get_number_of_active_pca_regions();
-        snap.region_directory_size = cache.get_region_directory_size();
         snap.point_evictions = cache.get_point_evictions();
         snap.region_invalidations = cache.get_region_invalidations();
         const size_t nidx = cache.get_number_of_mini_indexes();
@@ -168,16 +168,22 @@ int run_refresh_bench(
     const auto warmup = run_searches(n_warmup, "warmup", warmup_gt_ptr);
     cache.wait_for_pending_inserts();
 
-    qvcache_refresh::synthesize_extra(live, n_insert, seed);
-    auto t_ins0 = std::chrono::high_resolution_clock::now();
-    for (uint32_t id : live.extra_ids) {
-        cache.insert(id, live.ptr(id));
+    double insert_ms = 0.0;
+    if (n_insert > 0) {
+        qvcache_refresh::synthesize_extra(live, n_insert, seed);
+        auto t_ins0 = std::chrono::high_resolution_clock::now();
+        for (uint32_t id : live.extra_ids) {
+            cache.insert(id, live.ptr(id));
+        }
+        cache.wait_for_pending_inserts();
+        auto t_ins1 = std::chrono::high_resolution_clock::now();
+        insert_ms = std::chrono::duration<double, std::milli>(t_ins1 - t_ins0).count();
+        qvcache_refresh::log_mutate_phase("qvcache", "insert", live.extra_ids.size(), insert_ms,
+                                         -1.0, cache.get_region_invalidations());
+    } else {
+        spdlog::info("{{\"event\": \"refresh_insert\", \"cache\": \"qvcache\", "
+                     "\"n\": 0, \"skipped\": true, \"reason\": \"delete_only\"}}");
     }
-    cache.wait_for_pending_inserts();
-    auto t_ins1 = std::chrono::high_resolution_clock::now();
-    const double insert_ms = std::chrono::duration<double, std::milli>(t_ins1 - t_ins0).count();
-    qvcache_refresh::log_mutate_phase("qvcache", "insert", live.extra_ids.size(), insert_ms,
-                                     -1.0, cache.get_region_invalidations());
 
     std::vector<uint32_t> candidates;
     candidates.reserve(n_base + live.extra_ids.size());
@@ -223,7 +229,7 @@ int run_refresh_bench(
                  "\"warmup_recall_hits\": {}, \"warmup_recall_misses\": {}, "
                  "\"eval_hit_ratio\": {}, \"eval_miss_ratio\": {}, "
                  "\"eval_recall_all\": {}, \"eval_recall_hits\": {}, \"eval_recall_misses\": {}, "
-                 "\"eval_qps\": {}, \"memory_active_vectors\": {}, \"region_directory_size\": {}, "
+                 "\"eval_qps\": {}, \"memory_active_vectors\": {}, "
                  "\"region_invalidations\": {}}}",
                  warmup.search_ms, insert_ms, delete_ms, gt_ms, eval.search_ms,
                  warmup.hit_ratio(), warmup.recall_all(), warmup.recall_hits(),
@@ -231,7 +237,6 @@ int run_refresh_bench(
                  eval.recall_all(), eval.recall_hits(), eval.recall_misses(),
                  eval.search_ms > 0.0 ? static_cast<double>(eval.n_search) / (eval.search_ms / 1000.0) : 0.0,
                  cache.get_number_of_vectors_in_memory_index(),
-                 cache.get_region_directory_size(),
                  cache.get_region_invalidations());
 
     diskann::aligned_free(base);
@@ -300,7 +305,7 @@ int main(int argc, char** argv) {
         ("search_strategy", po::value<std::string>(&search_strategy)->default_value(search_strategy))
         ("metric", po::value<std::string>(&metric_str)->default_value(metric_str))
         ("insert_frac", po::value<double>(&insert_frac)->default_value(insert_frac),
-         "Extra vectors to insert after warmup (paper: 0.05 of |P|)")
+         "Extra vectors after warmup (paper: 0.05 of |P|). 0 = delete-only")
         ("delete_rate", po::value<double>(&delete_rate)->default_value(delete_rate),
          "Fraction of the live set deleted after inserts (paper: 0.05, 0.10, 0.25)")
         ("n_warmup", po::value<size_t>(&n_warmup)->default_value(n_warmup), "0 = all queries")

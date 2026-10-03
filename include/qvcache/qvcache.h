@@ -7,8 +7,7 @@
 #include "qvcache/pca_utils.h"
 #include "qvcache/lru_cache.h"
 #include "qvcache/backend_interface.h"
-#include "qvcache/hit_rate_tracker.h"
-#include "qvcache/region_directory.h" 
+#include "qvcache/hit_rate_tracker.h" 
 
 // System headers
 #include <cstdint>
@@ -72,17 +71,7 @@ namespace qvcache {
             std::atomic<bool> eviction_in_progress{false};
             std::future<void> eviction_future;
             std::mutex eviction_mutex;
-            std::atomic<size_t> evicting_shard_id{std::numeric_limits<size_t>::max()};
 
-            // Region-owned write shards: nearby query misses (and data inserts)
-            // land in the same mini-index so one graph walk can backfill.
-            // Off: search-only used temporal active_insert_index + LRU shard
-            // rotate. Region routing was added with ins/del and changes hits.
-            bool use_region_routing = false;
-            size_t coarse_pca_dims = 4;
-            size_t max_overflow_per_region = 2;
-            RegionDirectory region_directory{2};
-            std::atomic<uint64_t> region_clock{0};
             uint32_t miss_admit_delta = 0;
             double write_theta_discount = 0.80;
             size_t write_l1_radius = 1;
@@ -293,13 +282,6 @@ namespace qvcache {
                 eviction_in_progress.store(false);
             }
 
-            uint32_t coarse_key_of(const T* vec) {
-                if (!pca_utils) {
-                    return 0;
-                }
-                return pca_utils->compute_coarse_key(vec, coarse_pca_dims);
-            }
-
             bool shard_has_capacity(size_t i) const {
                 return i < memory_indices.size() && memory_indices[i] &&
                        memory_indices[i]->get_number_of_active_vectors() < memory_index_max_points_per_index;
@@ -392,7 +374,6 @@ namespace qvcache {
                     if (!memory_indices[i]) {
                         continue;
                     }
-                    evicting_shard_id.store(i);
                     for (TagT tag : victims) {
                         if (memory_indices[i]->lazy_delete(tag) == 0) {
                             dirty[i] = 1;
@@ -402,7 +383,6 @@ namespace qvcache {
                         consolidate_shard(i);
                     }
                 }
-                evicting_shard_id.store(std::numeric_limits<size_t>::max());
                 const uint64_t total = point_evictions.fetch_add(victims.size()) + victims.size();
                 if ((total - victims.size()) / 1000 != total / 1000) {
                     std::cout << "[PointEvict] cumulative=" << total
@@ -530,108 +510,27 @@ namespace qvcache {
                 }
             }
 
-            // L3: after a shard is dropped, leftover graphs must not satisfy a
-            // warmup-era θ. Reset every regional threshold bound to that shard.
-            void invalidate_thetas_for_shard(size_t shard) {
-                if (use_regional_theta && pca_utils) {
-                    for (uint32_t key : region_directory.keys_of_shard(shard)) {
-                        pca_utils->invalidate_thetas_for_coarse_key(key, coarse_pca_dims);
-                    }
-                } else {
+            // Global θ only. Regional thresholds stay with their PCA cells.
+            void invalidate_thetas_for_shard(size_t /*shard*/) {
+                if (!use_regional_theta || !pca_utils) {
                     reset_global_theta_map();
                 }
             }
 
             void replace_shard(size_t id) {
-                evicting_shard_id.store(id);
                 invalidate_thetas_for_shard(id);
-                region_directory.drop_shard(id);
                 memory_indices[id] = create_memory_index(memory_index_max_points_per_index);
-                evicting_shard_id.store(std::numeric_limits<size_t>::max());
             }
 
-            // Route a miss-admit to the region-owned write shard. If every
-            // shard is full, evict oldest admitted points (not the mini-index)
-            // and bind this cell to a shard that now has room. Data-plane
-            // insert never calls this.
-            size_t assign_write_shard(const T* vec, size_t n_admit) {
-                auto bind_or_overflow = [&](uint32_t key, uint64_t now, size_t existing, size_t chosen) {
-                    if (existing < memory_indices.size() && existing != chosen) {
-                        if (!region_directory.add_overflow(key, chosen, now)) {
-                            region_directory.bind_write(key, chosen, now);
-                        }
-                    } else {
-                        region_directory.bind_write(key, chosen, now);
-                    }
-                    active_insert_index_id.store(chosen);
-                    return chosen;
-                };
-
-                if (!use_region_routing || !pca_utils || vec == nullptr) {
-                    const size_t shard = active_insert_index_id.load();
-                    reclaim_insert_slots(shard);
-                    if (shard_has_insert_slots(shard)) {
-                        return shard;
-                    }
-                    return make_room_for_admit(n_admit);
+            // Miss-admit lands on the active insert shard. If it is full,
+            // evict oldest admitted points and use a shard that has room.
+            size_t assign_write_shard(const T* /*vec*/, size_t n_admit) {
+                const size_t shard = active_insert_index_id.load();
+                reclaim_insert_slots(shard);
+                if (shard_has_insert_slots(shard)) {
+                    return shard;
                 }
-                const uint32_t key = coarse_key_of(vec);
-                const uint64_t now = region_clock.fetch_add(1, std::memory_order_relaxed) + 1;
-                const size_t existing = region_directory.write_shard_of(key);
-                reclaim_insert_slots(existing);
-                if (shard_has_insert_slots(existing)) {
-                    region_directory.touch(key, now);
-                    return existing;
-                }
-
-                size_t chosen = find_shard_with_capacity();
-                if (chosen == std::numeric_limits<size_t>::max()) {
-                    chosen = make_room_for_admit(n_admit);
-                    if (chosen == std::numeric_limits<size_t>::max()) {
-                        return chosen;
-                    }
-                }
-
-                return bind_or_overflow(key, now, existing, chosen);
-            }
-
-            std::vector<size_t> probe_order(const T* query_ptr) {
-                std::vector<size_t> order;
-                std::unordered_set<size_t> seen;
-                if (use_region_routing && pca_utils && query_ptr != nullptr) {
-                    const uint32_t key = coarse_key_of(query_ptr);
-                    for (size_t s : region_directory.shards_of(key)) {
-                        if (s < memory_indices.size() && seen.insert(s).second) {
-                            order.push_back(s);
-                        }
-                    }
-                }
-                for (size_t id : lru_cache->get_all_tags()) {
-                    if (id < memory_indices.size() && seen.insert(id).second) {
-                        order.push_back(id);
-                    }
-                }
-                return order;
-            }
-
-            bool region_is_fresh(const T* query_ptr) {
-                if (!use_region_routing || query_ptr == nullptr) {
-                    return true;
-                }
-                const size_t victim = evicting_shard_id.load();
-                if (victim == std::numeric_limits<size_t>::max()) {
-                    return true;
-                }
-                if (!pca_utils) {
-                    return true;
-                }
-                const uint32_t key = coarse_key_of(query_ptr);
-                for (size_t s : region_directory.shards_of(key)) {
-                    if (s == victim) {
-                        return false;
-                    }
-                }
-                return true;
+                return make_room_for_admit(n_admit);
             }
 
             bool is_deleted_id(TagT id) {
@@ -665,36 +564,13 @@ namespace qvcache {
                 if (vector == nullptr) {
                     return false;
                 }
-                if (!use_region_routing || !pca_utils) {
-                    size_t shard = active_insert_index_id.load();
-                    reclaim_insert_slots(shard);
-                    if (!shard_has_insert_slots(shard)) {
-                        shard = find_shard_with_capacity();
-                        if (shard == std::numeric_limits<size_t>::max()) {
-                            return false;
-                        }
-                    }
-                    insert_point_into_shard(shard, id, vector);
-                    lru_cache->access(shard);
-                    return true;
-                }
-                const uint32_t key = coarse_key_of(vector);
-                const uint64_t now = region_clock.fetch_add(1, std::memory_order_relaxed) + 1;
-                const size_t existing = region_directory.write_shard_of(key);
-                if (existing >= memory_indices.size()) {
-                    return false;
-                }
-                size_t shard = existing;
-                reclaim_insert_slots(existing);
-                if (!shard_has_insert_slots(existing)) {
-                    const size_t spare = find_shard_with_capacity();
-                    if (spare == std::numeric_limits<size_t>::max() ||
-                        !region_directory.add_overflow(key, spare, now)) {
+                size_t shard = active_insert_index_id.load();
+                reclaim_insert_slots(shard);
+                if (!shard_has_insert_slots(shard)) {
+                    shard = find_shard_with_capacity();
+                    if (shard == std::numeric_limits<size_t>::max()) {
                         return false;
                     }
-                    shard = spare;
-                } else {
-                    region_directory.touch(key, now);
                 }
                 insert_point_into_shard(shard, id, vector);
                 lru_cache->access(shard);
@@ -1109,14 +985,7 @@ namespace qvcache {
 
             // Problematic search strategy: stop at first hit in LRU order (causes recall drops)
             bool search_sequential_lru_stop_first_hit(const T* query_ptr, uint32_t K, uint32_t* query_result_tags_ptr, std::vector<T *>& res, float* query_result_dists_ptr, void* backend_stats) {
-                // L3: if the region's write shard is mid-evict, fail to a miss.
-                if (!region_is_fresh(query_ptr)) {
-                    handle_backend_miss(query_ptr, K, query_result_tags_ptr, query_result_dists_ptr, backend_stats);
-                    return false;
-                }
-
-                // Region shards first, then LRU of the rest.
-                std::vector<size_t> lru_order = probe_order(query_ptr);
+                std::vector<size_t> lru_order = lru_cache->get_all_tags();
                 
                 for (size_t index_id : lru_order) {
                     if (index_id >= memory_indices.size()) {
@@ -1176,12 +1045,7 @@ namespace qvcache {
             
             // Helper method for SEQUENTIAL_ALL implementation with merge and re-rank
             bool search_sequential_all_impl(const T* query_ptr, uint32_t K, uint32_t* query_result_tags_ptr, std::vector<T *>& res, float* query_result_dists_ptr, void* backend_stats) {
-                if (!region_is_fresh(query_ptr)) {
-                    handle_backend_miss(query_ptr, K, query_result_tags_ptr, query_result_dists_ptr, backend_stats);
-                    return false;
-                }
-
-                std::vector<size_t> lru_order = probe_order(query_ptr);
+                std::vector<size_t> lru_order = lru_cache->get_all_tags();
                 
                 // Collect results from all indices
                 std::vector<std::vector<uint32_t>> all_tags(number_of_mini_indexes);
@@ -1549,10 +1413,6 @@ namespace qvcache {
             bool search(const T* query_ptr, uint32_t K, uint32_t* query_result_tags_ptr, std::vector<T *>& res, float* query_result_dists_ptr, void* backend_stats) {
                 tls_search_t0 = std::chrono::high_resolution_clock::now();
                 tls_cache_lookup_ms = 0.0;
-                if (!region_is_fresh(query_ptr)) {
-                    handle_backend_miss(query_ptr, K, query_result_tags_ptr, query_result_dists_ptr, backend_stats);
-                    return false;
-                }
                 size_t current_active_id = active_insert_index_id.load();
                 (void)current_active_id;
                 
@@ -1819,13 +1679,6 @@ namespace qvcache {
             bool backend_supports_updates() const {
                 return backend && backend->supports_updates();
             }
-
-            size_t get_region_directory_size() const {
-                return region_directory.region_count();
-            }
-
-            void set_region_routing(bool enabled) { use_region_routing = enabled; }
-            void set_coarse_pca_dims(size_t n) { coarse_pca_dims = n == 0 ? 1 : std::min(n, static_cast<size_t>(4)); }
 
             void enable_adaptive_strategy(bool enable) {
                 use_adaptive_strategy.store(enable, std::memory_order_release);

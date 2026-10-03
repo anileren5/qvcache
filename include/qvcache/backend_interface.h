@@ -25,8 +25,6 @@ class BackendInterface
     virtual std::vector<std::vector<T>> fetch_vectors_by_ids(
         const std::vector<TagT> &ids) = 0;
 
-    // Aker: insertWriteLog / markDeleted operate on the collection. DiskANN
-    // flash indexes cannot mutate; pgvector can. Default is "not supported".
     virtual bool supports_updates() const { return false; }
 
     virtual void insert(TagT id, const T* vector) {

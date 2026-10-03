@@ -1,6 +1,7 @@
 // Aker §5.4 refresh stress-test on Aker + pgvector (SPACEV-1M, simZipf 0.99).
 // Warmup is search-only. Re-search recall uses an in-memory exact top-k
-// over base + inserts − deletes. Existing GT files are not touched.
+// over base + inserts − deletes (insert_frac=0 is delete-only). Existing
+// GT files are not touched.
 
 #include <algorithm>
 #include <chrono>
@@ -94,9 +95,9 @@ int run_refresh_bench(
 
     spdlog::info("{{\"event\": \"refresh_start\", \"cache\": \"aker\", "
                  "\"n_base\": {}, \"n_queries\": {}, \"n_warmup\": {}, \"n_eval\": {}, "
-                 "\"insert_frac\": {}, \"n_insert\": {}, \"delete_rate\": {}, \"K\": {}, "
+                 "\"insert_frac\": {}, \"n_insert\": {}, \"delete_only\": {}, \"delete_rate\": {}, \"K\": {}, "
                  "\"aker_pool_size\": {}, \"aker_top_delta\": {}}}",
-                 n_base, nq, n_warmup, n_eval, insert_frac, n_insert, delete_rate, K,
+                 n_base, nq, n_warmup, n_eval, insert_frac, n_insert, n_insert == 0, delete_rate, K,
                  aker_pool_size, aker_top_delta);
 
     auto snapshot = [&]() {
@@ -151,17 +152,23 @@ int run_refresh_bench(
     }
     const auto warmup = run_searches(n_warmup, "warmup", warmup_gt_ptr);
 
-    qvcache_refresh::synthesize_extra(live, n_insert, seed);
-    auto t_ins0 = std::chrono::high_resolution_clock::now();
-    for (uint32_t id : live.extra_ids) {
-        aker_ops::apply_insert<T>(cache, backend, id, live.ptr(id), dim, vector_in_bytes, metric, false);
+    double insert_ms = 0.0;
+    if (n_insert > 0) {
+        qvcache_refresh::synthesize_extra(live, n_insert, seed);
+        auto t_ins0 = std::chrono::high_resolution_clock::now();
+        for (uint32_t id : live.extra_ids) {
+            aker_ops::apply_insert<T>(cache, backend, id, live.ptr(id), dim, vector_in_bytes, metric, false);
+        }
+        if (process_log) {
+            aker_ops::process_log<T>(cache, metric);
+        }
+        auto t_ins1 = std::chrono::high_resolution_clock::now();
+        insert_ms = std::chrono::duration<double, std::milli>(t_ins1 - t_ins0).count();
+        qvcache_refresh::log_mutate_phase("aker", "insert", live.extra_ids.size(), insert_ms);
+    } else {
+        spdlog::info("{{\"event\": \"refresh_insert\", \"cache\": \"aker\", "
+                     "\"n\": 0, \"skipped\": true, \"reason\": \"delete_only\"}}");
     }
-    if (process_log) {
-        aker_ops::process_log<T>(cache, metric);
-    }
-    auto t_ins1 = std::chrono::high_resolution_clock::now();
-    const double insert_ms = std::chrono::duration<double, std::milli>(t_ins1 - t_ins0).count();
-    qvcache_refresh::log_mutate_phase("aker", "insert", live.extra_ids.size(), insert_ms);
 
     std::vector<uint32_t> candidates;
     candidates.reserve(n_base + live.extra_ids.size());
@@ -257,7 +264,8 @@ int main(int argc, char** argv) {
          "Neighbor object pool; paper refresh uses 1% of |P|")
         ("search_threads", po::value<uint32_t>(&search_threads)->default_value(search_threads))
         ("metric", po::value<std::string>(&metric_str)->default_value(metric_str))
-        ("insert_frac", po::value<double>(&insert_frac)->default_value(insert_frac))
+        ("insert_frac", po::value<double>(&insert_frac)->default_value(insert_frac),
+         "Extra vectors after warmup (paper: 0.05 of |P|). 0 = delete-only")
         ("delete_rate", po::value<double>(&delete_rate)->default_value(delete_rate))
         ("n_warmup", po::value<size_t>(&n_warmup)->default_value(n_warmup))
         ("n_eval", po::value<size_t>(&n_eval)->default_value(n_eval))
@@ -265,7 +273,7 @@ int main(int argc, char** argv) {
         ("gt_threads", po::value<int>(&gt_threads)->default_value(gt_threads))
         ("seed", po::value<uint32_t>(&seed)->default_value(seed))
         ("aker_process_log", po::value<bool>(&process_log)->default_value(process_log),
-         "Process the insert log once after the 5% insert batch");
+         "Process the insert log once after the insert batch (no-op if insert_frac=0)");
 
     po::variables_map vm;
     try {

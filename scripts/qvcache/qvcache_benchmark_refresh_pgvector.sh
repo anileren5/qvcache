@@ -1,9 +1,10 @@
 #!/bin/bash
 # Aker §5.4 refresh stress-test: QVCache + pgvector on SPACEV-1M.
-# Warmup is search-only on simZipf 0.99. After inserts/deletes, exact
-# top-k is loaded from LIVE_GT_PATH if that sidecar already exists
+# Warmup is search-only on simZipf 0.99. After optional inserts and deletes,
+# exact top-k is loaded from LIVE_GT_PATH if that sidecar already exists
 # (same insert/delete/k/seed/query stream), otherwise computed and
-# written. Search-only GT files are never overwritten. Client is one
+# written. DELETE_ONLY=1 skips the 5% insert batch (INSERT_FRAC=0).
+# Search-only GT files are never overwritten. Client is one
 # thread. Mutates the PostgreSQL table.
 set -euo pipefail
 
@@ -55,6 +56,10 @@ METRIC="l2"
 
 INSERT_FRAC="${INSERT_FRAC:-0.05}"
 DELETE_RATE="${DELETE_RATE:-0.05}"
+DELETE_ONLY="${DELETE_ONLY:-0}"
+if [ "$DELETE_ONLY" != "0" ]; then
+  INSERT_FRAC=0
+fi
 N_WARMUP="${N_WARMUP:-0}"
 N_EVAL="${N_EVAL:-0}"
 REPORT_INTERVAL="${REPORT_INTERVAL:-100}"
@@ -92,7 +97,7 @@ echo "=========================================="
 echo "QVCache refresh stress-test - pgvector"
 echo "=========================================="
 echo "Dataset: $DATASET ($DATA_TYPE)  STREAM=${STREAM:-} SKEW=$SKEW  stream=$QUERY_STREAM"
-echo "insert_frac=$INSERT_FRAC delete_rate=$DELETE_RATE"
+echo "insert_frac=$INSERT_FRAC delete_rate=$DELETE_RATE delete_only=$DELETE_ONLY"
 echo "n_warmup=$N_WARMUP n_eval=$N_EVAL pool=$MEMORY_INDEX_MAX_POINTS"
 echo "memory_L=$MEMORY_L search_strategy=$SEARCH_STRATEGY"
 echo "write_theta_discount=$WRITE_THETA_DISCOUNT write_l1_radius=$WRITE_L1_RADIUS"

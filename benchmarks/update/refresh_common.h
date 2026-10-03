@@ -1,8 +1,9 @@
 #pragma once
 
 // Aker §5.4 refresh stress-test helpers, scaled to SPACEV-1M.
-// Protocol: warmup simZipf (search only, no GT) → insert 5% → delete D%
-// → exact top-k on the live set (base + inserts − deletes) → re-search.
+// Protocol: warmup simZipf (search only, no GT) → optional insert 5%
+// → delete D% → exact top-k on the live set (base + inserts − deletes)
+// → re-search. insert_frac=0 is delete-only (no extra vectors).
 // Search-only GT files are left alone. The live re-search top-k is
 // written to a separate sidecar path.
 
@@ -337,7 +338,6 @@ struct CacheSnapshot {
     size_t memory_active_vectors = 0;
     size_t memory_max_points = 0;
     size_t pca_active_regions = 0;
-    size_t region_directory_size = 0;
     uint64_t point_evictions = 0;
     uint64_t region_invalidations = 0;
     std::map<size_t, size_t> index_vectors;
@@ -526,7 +526,7 @@ inline void log_search_progress(const char* cache_name, const char* phase, size_
                      "\"avg_hit_ms\": {}, \"avg_miss_ms\": {}, \"miss_penalty_ms\": {}, "
                      "\"qps\": {}, \"qps_per_thread\": {}, "
                      "\"memory_active_vectors\": {}, \"memory_max_points\": {}, "
-                     "\"pca_active_regions\": {}, \"region_directory_size\": {}, \"point_evictions\": {}, \"region_invalidations\": {}, "
+                     "\"pca_active_regions\": {}, \"point_evictions\": {}, \"region_invalidations\": {}, "
                      "{}, "
                      "\"tail_latency_ms\": {{\"p50\": {}, \"p90\": {}, \"p95\": {}, \"p99\": {}}}, "
                      "\"recall_all\": {}, \"K\": {}, "
@@ -543,7 +543,7 @@ inline void log_search_progress(const char* cache_name, const char* phase, size_
                      iv.avg_hit_latency_ms(), iv.avg_miss_latency_ms(), iv.avg_miss_penalty_ms(),
                      iv_qps, threads ? iv_qps / static_cast<double>(threads) : iv_qps,
                      snap.memory_active_vectors, snap.memory_max_points,
-                     snap.pca_active_regions, snap.region_directory_size, snap.point_evictions, snap.region_invalidations,
+                     snap.pca_active_regions, snap.point_evictions, snap.region_invalidations,
                      indexes,
                      iv.p50, iv.p90, iv.p95, iv.p99,
                      iv.recall_all(), K,
@@ -562,7 +562,7 @@ inline void log_search_progress(const char* cache_name, const char* phase, size_
                      "\"avg_hit_ms\": {}, \"avg_miss_ms\": {}, \"miss_penalty_ms\": {}, "
                      "\"qps\": {}, \"qps_per_thread\": {}, "
                      "\"memory_active_vectors\": {}, \"memory_max_points\": {}, "
-                     "\"pca_active_regions\": {}, \"region_directory_size\": {}, \"point_evictions\": {}, \"region_invalidations\": {}, "
+                     "\"pca_active_regions\": {}, \"point_evictions\": {}, \"region_invalidations\": {}, "
                      "{}, "
                      "\"tail_latency_ms\": {{\"p50\": {}, \"p90\": {}, \"p95\": {}, \"p99\": {}}}, "
                      "\"recall_all\": null, \"K\": {}, "
@@ -576,7 +576,7 @@ inline void log_search_progress(const char* cache_name, const char* phase, size_
                      iv.avg_hit_latency_ms(), iv.avg_miss_latency_ms(), iv.avg_miss_penalty_ms(),
                      iv_qps, threads ? iv_qps / static_cast<double>(threads) : iv_qps,
                      snap.memory_active_vectors, snap.memory_max_points,
-                     snap.pca_active_regions, snap.region_directory_size, snap.point_evictions, snap.region_invalidations,
+                     snap.pca_active_regions, snap.point_evictions, snap.region_invalidations,
                      indexes,
                      iv.p50, iv.p90, iv.p95, iv.p99,
                      K, iv.hits,
@@ -603,7 +603,7 @@ inline void log_search_phase(const char* cache_name, const char* phase, const Ph
                      "\"miss_penalty_ms\": {}, "
                      "\"qps\": {}, \"qps_per_thread\": {}, \"elapsed_ms\": {}, "
                      "\"memory_active_vectors\": {}, \"memory_max_points\": {}, "
-                     "\"pca_active_regions\": {}, \"region_directory_size\": {}, \"point_evictions\": {}, \"region_invalidations\": {}, "
+                     "\"pca_active_regions\": {}, \"point_evictions\": {}, \"region_invalidations\": {}, "
                      "{}, "
                      "\"tail_latency_ms\": {{\"p50\": {}, \"p90\": {}, \"p95\": {}, \"p99\": {}}}, "
                      "\"recall_all\": {}, \"K\": {}, "
@@ -618,7 +618,7 @@ inline void log_search_phase(const char* cache_name, const char* phase, const Ph
                      all.avg_miss_penalty_ms(),
                      qps, threads ? qps / static_cast<double>(threads) : qps, m.search_ms,
                      snap.memory_active_vectors, snap.memory_max_points,
-                     snap.pca_active_regions, snap.region_directory_size, snap.point_evictions, snap.region_invalidations,
+                     snap.pca_active_regions, snap.point_evictions, snap.region_invalidations,
                      indexes,
                      all.p50, all.p90, all.p95, all.p99,
                      m.recall_all(), K,
@@ -635,7 +635,7 @@ inline void log_search_phase(const char* cache_name, const char* phase, const Ph
                      "\"miss_penalty_ms\": {}, "
                      "\"qps\": {}, \"qps_per_thread\": {}, \"elapsed_ms\": {}, "
                      "\"memory_active_vectors\": {}, \"memory_max_points\": {}, "
-                     "\"pca_active_regions\": {}, \"region_directory_size\": {}, \"point_evictions\": {}, \"region_invalidations\": {}, "
+                     "\"pca_active_regions\": {}, \"point_evictions\": {}, \"region_invalidations\": {}, "
                      "{}, "
                      "\"tail_latency_ms\": {{\"p50\": {}, \"p90\": {}, \"p95\": {}, \"p99\": {}}}, "
                      "\"recall_all\": null, \"K\": {}, "
@@ -648,7 +648,7 @@ inline void log_search_phase(const char* cache_name, const char* phase, const Ph
                      all.avg_miss_penalty_ms(),
                      qps, threads ? qps / static_cast<double>(threads) : qps, m.search_ms,
                      snap.memory_active_vectors, snap.memory_max_points,
-                     snap.pca_active_regions, snap.region_directory_size, snap.point_evictions, snap.region_invalidations,
+                     snap.pca_active_regions, snap.point_evictions, snap.region_invalidations,
                      indexes,
                      all.p50, all.p90, all.p95, all.p99,
                      K, m.n_hit);
