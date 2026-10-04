@@ -4,6 +4,7 @@
 
 // QVCache headers
 #include "qvcache/insert_thread_pool.h"
+#include "qvcache/search_thread_pool.h"
 #include "qvcache/pca_utils.h"
 #include "qvcache/lru_cache.h"
 #include "qvcache/backend_interface.h"
@@ -65,6 +66,8 @@ namespace qvcache {
             bool lazy_theta_updates = true;
             bool search_mini_indexes_in_parallel = false; // Control parallel vs sequential search
             size_t max_search_threads = 32; // Maximum threads for parallel search (should be > query processing threads)
+            // Declared after memory_indices so the pool joins before those indexes are destroyed.
+            std::unique_ptr<SearchThreadPool> search_pool;
             diskann::Metric metric = diskann::L2; // Distance metric (default: L2)
 
             // --- LRU eviction state ---
@@ -855,69 +858,38 @@ namespace qvcache {
                     return search_single_index(0, query_ptr, K, query_result_tags_ptr, res, query_result_dists_ptr);
                 }
 
-                // Prepare results for each index
+                // Prepare results for each index. Each index id is claimed by one worker.
                 std::vector<std::vector<uint32_t>> all_tags(number_of_mini_indexes);
                 std::vector<std::vector<float>> all_dists(number_of_mini_indexes);
                 std::vector<std::vector<T*>> all_res(number_of_mini_indexes);
-                std::vector<std::mutex> result_mutexes(number_of_mini_indexes);
-                std::vector<std::future<void>> futures;
 
-                // Lambda function for parallel search
                 auto search_worker = [&](size_t index_id) {
                     if (index_id >= memory_indices.size()) {
                         return;
                     }
-                    
+
                     if (memory_indices[index_id]->get_number_of_active_vectors() > 0) {
-                        // Allocate temporary storage for this thread
                         std::vector<uint32_t> temp_tags(K);
                         std::vector<float> temp_dists(K);
-                        // Don't pre-size temp_res - DiskANN's get_vector expects valid pointers if res_vectors is non-empty
-                        // We don't need the vectors for merging anyway, only tags and distances
+                        // Don't pre-size temp_res - DiskANN's get_vector expects valid pointers if res_vectors is non-empty.
                         std::vector<T*> temp_res;
-                        
-                        // Search in this index - returns number of results found
+
                         size_t num_results = memory_indices[index_id]->search_with_tags(query_ptr, K, memory_L, temp_tags.data(), temp_dists.data(), temp_res);
-                        
-                        // Resize tags and dists to actual number of results
-                        // temp_res stays empty (DiskANN skips populating it if empty, which is fine)
+
                         temp_tags.resize(num_results);
                         temp_dists.resize(num_results);
-                        
-                        // Store results atomically (we'll check for individual hits after all searches complete)
-                        {
-                            std::lock_guard<std::mutex> lock(result_mutexes[index_id]);
-                            all_tags[index_id] = std::move(temp_tags);
-                            all_dists[index_id] = std::move(temp_dists);
-                            all_res[index_id] = std::move(temp_res);
-                        }
+                        all_tags[index_id] = std::move(temp_tags);
+                        all_dists[index_id] = std::move(temp_dists);
+                        all_res[index_id] = std::move(temp_res);
                     }
                 };
 
-                // Submit tasks to thread pool
-                size_t worker_count = std::min(max_search_threads, number_of_mini_indexes);
-                if (worker_count == 0) {
-                    return false;
-                }
-
-                std::atomic<size_t> next_index{0};
-                auto worker_loop = [&]() {
-                    while (true) {
-                        size_t index_id = next_index.fetch_add(1, std::memory_order_relaxed);
-                        if (index_id >= number_of_mini_indexes) {
-                            break;
-                        }
+                if (search_pool) {
+                    search_pool->parallel_for(number_of_mini_indexes, search_worker);
+                } else {
+                    for (size_t index_id = 0; index_id < number_of_mini_indexes; ++index_id) {
                         search_worker(index_id);
                     }
-                };
-
-                for (size_t i = 0; i < worker_count; ++i) {
-                    futures.emplace_back(std::async(std::launch::async, worker_loop));
-                }
-
-                // Wait for all tasks to complete
-                for (auto& future : futures) {
-                    future.get();
                 }
 
                 // Collect indices that were searched
@@ -1309,8 +1281,13 @@ namespace qvcache {
                 std::cout << "QVCache LRU-managed memory indices built successfully!" << std::endl;
                 std::cout << "Created " << number_of_mini_indexes << " indices, each can hold up to " << memory_index_max_points_per_index << " vectors" << std::endl;
                 std::cout << "LRU eviction policy enabled" << std::endl;
-                if (search_mini_indexes_in_parallel) {
-                    std::cout << "Parallel search enabled with max " << max_search_threads << " threads" << std::endl;
+                if (search_mini_indexes_in_parallel && number_of_mini_indexes > 1) {
+                    const size_t pool_threads = std::min(max_search_threads, number_of_mini_indexes);
+                    if (pool_threads > 1) {
+                        search_pool = std::make_unique<SearchThreadPool>(pool_threads);
+                    }
+                    std::cout << "Parallel search enabled with a fixed pool of "
+                              << (search_pool ? search_pool->size() : 0) << " threads" << std::endl;
                 }
 
                 std::cout << "QVCache disk index built successfully!" << std::endl;

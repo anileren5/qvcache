@@ -116,6 +116,86 @@ float SlowDistanceCosineUInt8::compare(const uint8_t *a, const uint8_t *b, uint3
 // L2 distance functions.
 //
 
+#ifdef USE_AVX2
+namespace {
+
+// Exact squared L2. int8 differences are widened to int16 before squaring, so
+// this matches the scalar loop (saturating epi8 subtract does not).
+inline int32_t hsum_epi32(__m256i v)
+{
+    __m128i sum = _mm_add_epi32(_mm256_castsi256_si128(v), _mm256_extracti128_si256(v, 1));
+    sum = _mm_add_epi32(sum, _mm_shuffle_epi32(sum, _MM_SHUFFLE(1, 0, 3, 2)));
+    sum = _mm_add_epi32(sum, _mm_shuffle_epi32(sum, _MM_SHUFFLE(2, 3, 0, 1)));
+    return _mm_cvtsi128_si32(sum);
+}
+
+inline int32_t l2sqr_i8_avx2(const int8_t *a, const int8_t *b, uint32_t size)
+{
+    __m256i acc0 = _mm256_setzero_si256();
+    __m256i acc1 = _mm256_setzero_si256();
+    uint32_t i = 0;
+    for (; i + 32 <= size; i += 32)
+    {
+        __m128i a0 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(a + i));
+        __m128i b0 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(b + i));
+        __m128i a1 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(a + i + 16));
+        __m128i b1 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(b + i + 16));
+        __m256i d0 = _mm256_sub_epi16(_mm256_cvtepi8_epi16(a0), _mm256_cvtepi8_epi16(b0));
+        __m256i d1 = _mm256_sub_epi16(_mm256_cvtepi8_epi16(a1), _mm256_cvtepi8_epi16(b1));
+        acc0 = _mm256_add_epi32(acc0, _mm256_madd_epi16(d0, d0));
+        acc1 = _mm256_add_epi32(acc1, _mm256_madd_epi16(d1, d1));
+    }
+    for (; i + 16 <= size; i += 16)
+    {
+        __m128i av = _mm_loadu_si128(reinterpret_cast<const __m128i *>(a + i));
+        __m128i bv = _mm_loadu_si128(reinterpret_cast<const __m128i *>(b + i));
+        __m256i d = _mm256_sub_epi16(_mm256_cvtepi8_epi16(av), _mm256_cvtepi8_epi16(bv));
+        acc0 = _mm256_add_epi32(acc0, _mm256_madd_epi16(d, d));
+    }
+    int32_t result = hsum_epi32(_mm256_add_epi32(acc0, acc1));
+    for (; i < size; ++i)
+    {
+        int32_t diff = static_cast<int32_t>(a[i]) - static_cast<int32_t>(b[i]);
+        result += diff * diff;
+    }
+    return result;
+}
+
+inline int32_t l2sqr_u8_avx2(const uint8_t *a, const uint8_t *b, uint32_t size)
+{
+    __m256i acc0 = _mm256_setzero_si256();
+    __m256i acc1 = _mm256_setzero_si256();
+    uint32_t i = 0;
+    for (; i + 32 <= size; i += 32)
+    {
+        __m128i a0 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(a + i));
+        __m128i b0 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(b + i));
+        __m128i a1 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(a + i + 16));
+        __m128i b1 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(b + i + 16));
+        __m256i d0 = _mm256_sub_epi16(_mm256_cvtepu8_epi16(a0), _mm256_cvtepu8_epi16(b0));
+        __m256i d1 = _mm256_sub_epi16(_mm256_cvtepu8_epi16(a1), _mm256_cvtepu8_epi16(b1));
+        acc0 = _mm256_add_epi32(acc0, _mm256_madd_epi16(d0, d0));
+        acc1 = _mm256_add_epi32(acc1, _mm256_madd_epi16(d1, d1));
+    }
+    for (; i + 16 <= size; i += 16)
+    {
+        __m128i av = _mm_loadu_si128(reinterpret_cast<const __m128i *>(a + i));
+        __m128i bv = _mm_loadu_si128(reinterpret_cast<const __m128i *>(b + i));
+        __m256i d = _mm256_sub_epi16(_mm256_cvtepu8_epi16(av), _mm256_cvtepu8_epi16(bv));
+        acc0 = _mm256_add_epi32(acc0, _mm256_madd_epi16(d, d));
+    }
+    int32_t result = hsum_epi32(_mm256_add_epi32(acc0, acc1));
+    for (; i < size; ++i)
+    {
+        int32_t diff = static_cast<int32_t>(a[i]) - static_cast<int32_t>(b[i]);
+        result += diff * diff;
+    }
+    return result;
+}
+
+} // namespace
+#endif
+
 float DistanceL2Int8::compare(const int8_t *a, const int8_t *b, uint32_t size) const
 {
 #ifdef _WINDOWS
@@ -150,6 +230,9 @@ float DistanceL2Int8::compare(const int8_t *a, const int8_t *b, uint32_t size) c
     return (float)result;
 #endif
 #else
+#ifdef USE_AVX2
+    return static_cast<float>(l2sqr_i8_avx2(a, b, size));
+#else
     int32_t result = 0;
 #pragma omp simd reduction(+ : result) aligned(a, b : 8)
     for (int32_t i = 0; i < (int32_t)size; i++)
@@ -158,10 +241,14 @@ float DistanceL2Int8::compare(const int8_t *a, const int8_t *b, uint32_t size) c
     }
     return (float)result;
 #endif
+#endif
 }
 
 float DistanceL2UInt8::compare(const uint8_t *a, const uint8_t *b, uint32_t size) const
 {
+#ifdef USE_AVX2
+    return static_cast<float>(l2sqr_u8_avx2(a, b, size));
+#else
     uint32_t result = 0;
 #ifndef _WINDOWS
 #pragma omp simd reduction(+ : result) aligned(a, b : 8)
@@ -171,6 +258,7 @@ float DistanceL2UInt8::compare(const uint8_t *a, const uint8_t *b, uint32_t size
         result += ((int32_t)((int16_t)a[i] - (int16_t)b[i])) * ((int32_t)((int16_t)a[i] - (int16_t)b[i]));
     }
     return (float)result;
+#endif
 }
 
 #ifndef _WINDOWS

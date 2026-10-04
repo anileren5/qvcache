@@ -10,13 +10,30 @@
 namespace diskann
 {
 
+// Neighbor vectors are read at random. A slot that is a whole number of
+// cache lines lets one prefetch pull the entire vector: a 104-byte int8
+// vector otherwise spans two or three lines and the tail misses inside
+// compare(). The tail is zero, so L2, cosine, and inner product are unchanged.
+constexpr size_t k_vector_cacheline = 64;
+
+template <typename data_t> size_t cacheline_slot_elems(size_t dim, size_t align_elems)
+{
+    if (align_elems == 0)
+    {
+        align_elems = 1;
+    }
+    const size_t elems = ROUND_UP(dim, align_elems);
+    const size_t bytes = ROUND_UP(elems * sizeof(data_t), k_vector_cacheline);
+    return bytes / sizeof(data_t);
+}
+
 template <typename data_t>
 InMemDataStore<data_t>::InMemDataStore(const location_t num_points, const size_t dim,
                                        std::unique_ptr<Distance<data_t>> distance_fn)
     : AbstractDataStore<data_t>(num_points, dim), _distance_fn(std::move(distance_fn))
 {
-    _aligned_dim = ROUND_UP(dim, _distance_fn->get_required_alignment());
-    alloc_aligned(((void **)&_data), this->_capacity * _aligned_dim * sizeof(data_t), 8 * sizeof(data_t));
+    _aligned_dim = cacheline_slot_elems<data_t>(dim, _distance_fn->get_required_alignment());
+    alloc_aligned(((void **)&_data), this->_capacity * _aligned_dim * sizeof(data_t), k_vector_cacheline);
     std::memset(_data, 0, this->_capacity * _aligned_dim * sizeof(data_t));
 }
 
@@ -185,6 +202,13 @@ void InMemDataStore<data_t>::preprocess_query(const data_t *query, AbstractScrat
     if (query_scratch != nullptr)
     {
         memcpy(query_scratch->aligned_query_T(), query, sizeof(data_t) * this->get_dims());
+        // Slot tail is part of the distance length. It must stay zero or the
+        // padding bytes change the result.
+        if (_aligned_dim > this->get_dims())
+        {
+            std::memset(query_scratch->aligned_query_T() + this->get_dims(), 0,
+                        sizeof(data_t) * (_aligned_dim - this->get_dims()));
+        }
     }
     else
     {
@@ -205,8 +229,24 @@ void InMemDataStore<data_t>::get_distance(const data_t *query, const location_t 
                                           const uint32_t location_count, float *distances,
                                           AbstractScratch<data_t> *scratch_space) const
 {
-    for (location_t i = 0; i < location_count; i++)
+    // Graph neighbors are scattered. Pull the next few vectors into cache
+    // while the current distance runs. Depth 8 stays within the CPU's fill buffers.
+    const size_t vec_bytes = sizeof(data_t) * _aligned_dim;
+    constexpr uint32_t k_prefetch_ahead = 8;
+    auto prefetch_at = [&](uint32_t j) {
+        if (j < location_count)
+        {
+            diskann::prefetch_vector(reinterpret_cast<const char *>(_data + (size_t)locations[j] * _aligned_dim),
+                                     vec_bytes);
+        }
+    };
+    for (uint32_t j = 0; j < k_prefetch_ahead; ++j)
     {
+        prefetch_at(j);
+    }
+    for (uint32_t i = 0; i < location_count; i++)
+    {
+        prefetch_at(i + k_prefetch_ahead);
         distances[i] = _distance_fn->compare(query, _data + locations[i] * _aligned_dim, (uint32_t)this->_aligned_dim);
     }
 }
@@ -222,8 +262,22 @@ template <typename data_t>
 void InMemDataStore<data_t>::get_distance(const data_t *preprocessed_query, const std::vector<location_t> &ids,
                                           std::vector<float> &distances, AbstractScratch<data_t> *scratch_space) const
 {
-    for (int i = 0; i < ids.size(); i++)
+    const size_t vec_bytes = sizeof(data_t) * _aligned_dim;
+    constexpr int k_prefetch_ahead = 8;
+    const int n = static_cast<int>(ids.size());
+    auto prefetch_at = [&](int j) {
+        if (j < n)
+        {
+            diskann::prefetch_vector(reinterpret_cast<const char *>(_data + (size_t)ids[j] * _aligned_dim), vec_bytes);
+        }
+    };
+    for (int j = 0; j < k_prefetch_ahead; ++j)
     {
+        prefetch_at(j);
+    }
+    for (int i = 0; i < n; i++)
+    {
+        prefetch_at(i + k_prefetch_ahead);
         distances[i] =
             _distance_fn->compare(preprocessed_query, _data + ids[i] * _aligned_dim, (uint32_t)this->_aligned_dim);
     }
@@ -244,12 +298,12 @@ template <typename data_t> location_t InMemDataStore<data_t>::expand(const locat
     }
 #ifndef _WINDOWS
     data_t *new_data;
-    alloc_aligned((void **)&new_data, new_size * _aligned_dim * sizeof(data_t), 8 * sizeof(data_t));
+    alloc_aligned((void **)&new_data, new_size * _aligned_dim * sizeof(data_t), k_vector_cacheline);
     memcpy(new_data, _data, this->capacity() * _aligned_dim * sizeof(data_t));
     aligned_free(_data);
     _data = new_data;
 #else
-    realloc_aligned((void **)&_data, new_size * _aligned_dim * sizeof(data_t), 8 * sizeof(data_t));
+    realloc_aligned((void **)&_data, new_size * _aligned_dim * sizeof(data_t), k_vector_cacheline);
 #endif
     this->_capacity = new_size;
     return this->_capacity;
@@ -270,12 +324,12 @@ template <typename data_t> location_t InMemDataStore<data_t>::shrink(const locat
     }
 #ifndef _WINDOWS
     data_t *new_data;
-    alloc_aligned((void **)&new_data, new_size * _aligned_dim * sizeof(data_t), 8 * sizeof(data_t));
+    alloc_aligned((void **)&new_data, new_size * _aligned_dim * sizeof(data_t), k_vector_cacheline);
     memcpy(new_data, _data, new_size * _aligned_dim * sizeof(data_t));
     aligned_free(_data);
     _data = new_data;
 #else
-    realloc_aligned((void **)&_data, new_size * _aligned_dim * sizeof(data_t), 8 * sizeof(data_t));
+    realloc_aligned((void **)&_data, new_size * _aligned_dim * sizeof(data_t), k_vector_cacheline);
 #endif
     this->_capacity = new_size;
     return this->_capacity;
