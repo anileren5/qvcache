@@ -40,7 +40,7 @@ run_step() {
   echo "=========================================="
 } | tee "${STATUS}"
 
-export LD_LIBRARY_PATH="/app/Aker/build/lib:/usr/local/lib:/opt/boost_1_86/lib:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="/app/external/Aker/build/lib:/usr/local/lib:/opt/boost_1_86/lib:${LD_LIBRARY_PATH:-}"
 
 # SPACEV-10M sim-100k-0.6 query bin (npy may still need a download).
 if [[ ! -f data/spacev-10m/spacev-10m_query_sim-100k-0.6.bin ]]; then

@@ -121,7 +121,7 @@ install_faiss() {
         fi
     fi
 
-    # Aker: flags copied from Aker/docker/images/Dockerfile.aker_test
+    # Aker: flags copied from external/Aker/docker/images/Dockerfile.aker_test
     cmake -S "${FAISS_SRC}" -B "${FAISS_SRC}/build" \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX="${FAISS_PREFIX}" \

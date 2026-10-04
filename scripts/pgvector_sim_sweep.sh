@@ -40,7 +40,7 @@ run_step() {
   echo "=========================================="
 } | tee "${STATUS}"
 
-export LD_LIBRARY_PATH="/app/Aker/build/lib:/usr/local/lib:/opt/boost_1_86/lib:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="/app/external/Aker/build/lib:/usr/local/lib:/opt/boost_1_86/lib:${LD_LIBRARY_PATH:-}"
 
 streams=(
   sim-100k-0.3

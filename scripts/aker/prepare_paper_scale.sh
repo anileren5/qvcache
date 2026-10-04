@@ -19,7 +19,7 @@ BUILD_THREADS="${BUILD_THREADS:-8}"
 
 DATASET="${DATASET:-spacev-10m}"
 DATA_TYPE="${DATA_TYPE:-int8}"
-AKER_DATASET_DIR="${AKER_DATASET_DIR:-Aker/pgvector-bench/dataset/spacev-10m}"
+AKER_DATASET_DIR="${AKER_DATASET_DIR:-external/Aker/pgvector-bench/dataset/spacev-10m}"
 BASE_NPY_NAME="spacev-10m.npy"
 QUERY_NPY_NAME="spacev-sim-100k-${SKEW}.npy"
 R="${R:-64}"

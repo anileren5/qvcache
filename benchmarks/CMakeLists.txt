@@ -38,7 +38,7 @@ foreach(i RANGE 0 ${max_index} 2)
 endforeach()
 
 # Aker: DiskANN benchmark that uses libaker.so as the result cache
-set(AKER_ROOT "${PROJECT_SOURCE_DIR}/Aker")
+set(AKER_ROOT "${PROJECT_SOURCE_DIR}/external/Aker")
 find_library(AKER_LIBRARY
     NAMES aker
     PATHS "${AKER_ROOT}/build/lib" /usr/local/lib

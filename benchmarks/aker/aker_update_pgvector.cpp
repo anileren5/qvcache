@@ -311,7 +311,7 @@ int run_update_bench(
 
 int main(int argc, char** argv) {
     std::string data_type, data_path, query_path;
-    std::string aker_config_path = "Aker/bootstrap/aker-standard.ini";
+    std::string aker_config_path = "external/Aker/bootstrap/aker-standard.ini";
     std::string table_name = "spacev_1m";
     std::string db_host = "postgres", db_name = "postgres", db_user = "postgres", db_password = "postgres";
     int db_port = 5432, hnsw_ef_search = 200;

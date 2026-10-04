@@ -30,7 +30,7 @@ fi
 
 K=10
 SEARCH_THREADS=1
-AKER_CONFIG="Aker/bootstrap/aker-standard.ini"
+AKER_CONFIG="external/Aker/bootstrap/aker-standard.ini"
 # Paper AK-D10: Δ=10. Pool matches QVCache MEMORY_INDEX_MAX_POINTS.
 AKER_TOP_DELTA="${AKER_TOP_DELTA:-10}"
 AKER_POOL_SIZE="${AKER_POOL_SIZE:-200000}"
@@ -92,7 +92,7 @@ if [ "$REBUILD_INDEX" != "0" ]; then
     ./python/scripts/build_index/build_pgvector_index.sh
 fi
 
-export LD_LIBRARY_PATH="/app/Aker/build/lib:/usr/local/lib:/opt/boost_1_86/lib:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="/app/external/Aker/build/lib:/usr/local/lib:/opt/boost_1_86/lib:${LD_LIBRARY_PATH:-}"
 export OMP_NUM_THREADS="${SEARCH_THREADS}"
 export OMP_MAX_ACTIVE_LEVELS=1
 

@@ -25,7 +25,7 @@ status() { echo "$(ts) $*" | tee -a "${STATUS}"; }
   echo "=========================================="
 } | tee "${STATUS}"
 
-export LD_LIBRARY_PATH="/app/Aker/build/lib:/usr/local/lib:/opt/boost_1_86/lib:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="/app/external/Aker/build/lib:/usr/local/lib:/opt/boost_1_86/lib:${LD_LIBRARY_PATH:-}"
 
 run_pair() {
   local group="$1"

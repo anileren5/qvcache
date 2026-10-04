@@ -42,7 +42,7 @@ BEAMWIDTH=2
 SECTOR_LEN=4096
 METRIC="l2"
 
-AKER_CONFIG="Aker/bootstrap/aker-standard.ini"
+AKER_CONFIG="external/Aker/bootstrap/aker-standard.ini"
 AKER_TOP_DELTA=5
 # Same result-vector budget as QVCache MEMORY_INDEX_MAX_POINTS.
 AKER_POOL_SIZE=200000
@@ -79,7 +79,7 @@ echo "Report interval: $REPORT_INTERVAL queries"
 echo "=========================================="
 echo ""
 
-export LD_LIBRARY_PATH="/app/Aker/build/lib:/usr/local/lib:/opt/boost_1_86/lib:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="/app/external/Aker/build/lib:/usr/local/lib:/opt/boost_1_86/lib:${LD_LIBRARY_PATH:-}"
 # FAISS nested OpenMP: pin to SEARCH_THREADS so pgvector approx-hits match DiskANN.
 export OMP_NUM_THREADS="${SEARCH_THREADS}"
 export OMP_MAX_ACTIVE_LEVELS=1

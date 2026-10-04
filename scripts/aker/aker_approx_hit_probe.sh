@@ -10,7 +10,7 @@ QUERY_INDEX="${QUERY_INDEX:-0}"
 MU0="${MU0:-1.0}"
 MU_DECAY="${MU_DECAY:-0.5}"
 MAX_ITERS="${MAX_ITERS:-24}"
-AKER_CONFIG="${AKER_CONFIG:-Aker/bootstrap/aker-standard.ini}"
+AKER_CONFIG="${AKER_CONFIG:-external/Aker/bootstrap/aker-standard.ini}"
 
 DATA_PATH="data/${DATASET}/${DATASET}_base.bin"
 if [[ "${QUERY_STREAM}" = "query" ]]; then
@@ -33,7 +33,7 @@ if [[ ! -f "${DISK_INDEX_PREFIX}_disk.index" ]]; then
   exit 1
 fi
 
-export LD_LIBRARY_PATH="/app/Aker/build/lib:/usr/local/lib:/opt/boost_1_86/lib:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="/app/external/Aker/build/lib:/usr/local/lib:/opt/boost_1_86/lib:${LD_LIBRARY_PATH:-}"
 
 ./build/benchmarks/aker_approx_hit_probe \
   --data_type "${DATA_TYPE}" \

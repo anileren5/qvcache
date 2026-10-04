@@ -379,7 +379,7 @@ int run_probe(
 
 int main(int argc, char** argv) {
     std::string data_type, data_path, query_path, disk_index_prefix;
-    std::string aker_config_path = "Aker/bootstrap/aker-standard.ini";
+    std::string aker_config_path = "external/Aker/bootstrap/aker-standard.ini";
     uint32_t R = 64, disk_L = 32, K = 10, B = 8, M = 8;
     uint32_t build_threads = 8, beamwidth = 2, sector_len = 4096, aker_top_delta = 5;
     int disk_index_already_built = 1;

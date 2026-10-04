@@ -18,7 +18,7 @@ fi
 
 K=10
 SEARCH_THREADS=1
-AKER_CONFIG="Aker/bootstrap/aker-standard.ini"
+AKER_CONFIG="external/Aker/bootstrap/aker-standard.ini"
 AKER_TOP_DELTA=5
 AKER_POOL_SIZE=200000
 METRIC="l2"
@@ -60,7 +60,7 @@ echo "PostgreSQL: $DB_HOST:$DB_PORT/$DB_NAME table=$TABLE_NAME"
 echo "NOTE: this run mutates the table. Rebuild the pgvector index afterwards."
 echo "=========================================="
 
-export LD_LIBRARY_PATH="/app/Aker/build/lib:/usr/local/lib:/opt/boost_1_86/lib:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="/app/external/Aker/build/lib:/usr/local/lib:/opt/boost_1_86/lib:${LD_LIBRARY_PATH:-}"
 export OMP_NUM_THREADS="${SEARCH_THREADS}"
 export OMP_MAX_ACTIVE_LEVELS=1
 

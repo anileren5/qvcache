@@ -24,14 +24,14 @@ RUN apt update && \
 
 # Aker: Ubuntu 22.04 CMake (3.22) and Boost (1.74) are too old for Aker/FAISS.
 # Install CMake 3.28, Boost 1.86, and FAISS C++ into the image. libaker.so itself
-# is built later inside the container (bind-mounted source at /app/Aker).
+# is built later inside the container (bind-mounted source at /app/external/Aker).
 COPY scripts/aker/install_deps.sh /tmp/install_aker_deps.sh
 RUN bash /tmp/install_aker_deps.sh && rm -f /tmp/install_aker_deps.sh
 
 # Aker: Boost 1.86, FAISS, and Aker's libaker.so (Aker skips RPATH; loader needs this path)
 ENV BOOST_ROOT=/opt/boost_1_86
 ENV FAISS_ROOT=/usr/local
-ENV AKER_CONFIG_PATH=/app/Aker/bootstrap/aker-standard.ini
-ENV LD_LIBRARY_PATH=/app/Aker/build/lib:/opt/boost_1_86/lib:/usr/lib/x86_64-linux-gnu:/usr/local/lib:${LD_LIBRARY_PATH}
+ENV AKER_CONFIG_PATH=/app/external/Aker/bootstrap/aker-standard.ini
+ENV LD_LIBRARY_PATH=/app/external/Aker/build/lib:/opt/boost_1_86/lib:/usr/lib/x86_64-linux-gnu:/usr/local/lib:${LD_LIBRARY_PATH}
 
 WORKDIR /app

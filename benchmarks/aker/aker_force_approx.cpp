@@ -23,7 +23,7 @@ static float dist_zero(uint8_t*, uint8_t*, size_t) { return 0.0f; }
 
 static anns_cache_c_wrapper_t* make_cache(uint32_t dim, size_t vinb, uint32_t k, uint32_t td) {
     anns_cache_parameter_c_t p{};
-    akerImportAnnsCacheConfig(const_cast<char*>("Aker/bootstrap/aker-standard.ini"), &p);
+    akerImportAnnsCacheConfig(const_cast<char*>("external/Aker/bootstrap/aker-standard.ini"), &p);
     p.vector_format.dimension = dim;
     p.vector_format.vector_in_bytes = vinb;
     p.capacity.in_topk = k;

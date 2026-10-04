@@ -800,7 +800,7 @@ void experiment_benchmark(
 
 int main(int argc, char **argv) {
     std::string data_type, data_path, query_path, groundtruth_path, disk_index_prefix;
-    std::string aker_config_path = "Aker/bootstrap/aker-standard.ini";
+    std::string aker_config_path = "external/Aker/bootstrap/aker-standard.ini";
     uint32_t R, disk_L, K, B, M;
     uint32_t build_threads, search_threads, beamwidth;
     int disk_index_already_built;
@@ -850,7 +850,7 @@ int main(int argc, char **argv) {
             ("beamwidth", po::value<uint32_t>(&beamwidth)->default_value(2), "Beamwidth")
             ("sector_len", po::value<uint32_t>(&sector_len)->default_value(4096), "Sector length in bytes")
             ("memory_index_max_points", po::value<size_t>(&memory_index_max_points)->default_value(100000), "Used to size Aker pool if aker_pool_size is 0")
-            ("aker_config", po::value<std::string>(&aker_config_path)->default_value("Aker/bootstrap/aker-standard.ini"), "Aker bootstrap INI/JSON path")
+            ("aker_config", po::value<std::string>(&aker_config_path)->default_value("external/Aker/bootstrap/aker-standard.ini"), "Aker bootstrap INI/JSON path")
             ("aker_pool_size", po::value<size_t>(&aker_pool_size)->default_value(0), "Aker vector pool size (0 = auto)")
             ("aker_top_delta", po::value<uint32_t>(&aker_top_delta)->default_value(5), "Aker top_delta extra neighbors per entry")
             ("n_splits", po::value<int>(&n_splits)->required(), "Number of splits for queries")

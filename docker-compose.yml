@@ -4,7 +4,7 @@ services:
     image: qvcache:latest
     build: .
     volumes:
-      # Aker: the Aker tree is included via this bind mount at /app/Aker
+      # Aker: the Aker tree is included via this bind mount at /app/external/Aker
       - .:/app
     working_dir: /app
     entrypoint: bash

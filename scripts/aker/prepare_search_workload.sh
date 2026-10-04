@@ -8,7 +8,7 @@ cd "$(dirname "$0")/../.." || exit 1
 
 DATASET="${DATASET:-spacev-small-test}"
 DATA_TYPE="${DATA_TYPE:-int8}"
-AKER_DATASET_DIR="${AKER_DATASET_DIR:-Aker/pgvector-bench/dataset/spacev-small-test}"
+AKER_DATASET_DIR="${AKER_DATASET_DIR:-external/Aker/pgvector-bench/dataset/spacev-small-test}"
 OUT_DIR="${OUT_DIR:-data/${DATASET}}"
 K="${K:-100}"
 METRIC="${METRIC:-l2}"

@@ -8,7 +8,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-AKER_ROOT="${AKER_ROOT:-${REPO_ROOT}/Aker}"
+AKER_ROOT="${AKER_ROOT:-${REPO_ROOT}/external/Aker}"
 BOOST_ROOT="${BOOST_ROOT:-/opt/boost_1_86}"
 FAISS_ROOT="${FAISS_ROOT:-/usr/local}"
 AKER_MODE="${AKER_MODE:-standard}"
