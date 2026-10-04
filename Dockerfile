@@ -20,7 +20,7 @@ RUN apt update && \
     # Install Python dependencies for bindings
     python3 -m pip install --upgrade pip setuptools wheel && \
     python3 -m pip install "protobuf<5.0.0" && \
-    python3 -m pip install pybind11 numpy matplotlib qdrant-client pinecone psycopg2-binary faiss-cpu
+    python3 -m pip install pybind11 numpy matplotlib psycopg2-binary
 
 # Aker: Ubuntu 22.04 CMake (3.22) and Boost (1.74) are too old for Aker/FAISS.
 # Install CMake 3.28, Boost 1.86, and FAISS C++ into the image. libaker.so itself
@@ -28,9 +28,6 @@ RUN apt update && \
 COPY scripts/aker/install_deps.sh /tmp/install_aker_deps.sh
 RUN bash /tmp/install_aker_deps.sh && rm -f /tmp/install_aker_deps.sh
 
-# Set up LD_LIBRARY_PATH to include Python library directory and TBB libraries for SPTAG client
-# TBB libraries are typically in /usr/lib/x86_64-linux-gnu
-# Also check common TBB installation locations
 # Aker: Boost 1.86, FAISS, and Aker's libaker.so (Aker skips RPATH; loader needs this path)
 ENV BOOST_ROOT=/opt/boost_1_86
 ENV FAISS_ROOT=/usr/local

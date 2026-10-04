@@ -236,7 +236,7 @@ def backend_search(
     Perform backend-only search on queries (without QVCache).
     
     Args:
-        backend: Backend instance (FaissBackend, QdrantBackend, etc.)
+        backend: Backend instance (for example PgVectorBackend)
         queries: Query vectors as numpy array (query_num, dim)
         K: Number of nearest neighbors
         search_threads: Number of search threads (for logging)

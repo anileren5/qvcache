@@ -1,2 +1,0 @@
-python process_stress_test.py log_stress_spfresh.log
-gnuplot stress_test_new.p

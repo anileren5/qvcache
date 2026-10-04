@@ -13,7 +13,6 @@ We provide a Docker-based environment that allows rapid deployment and experimen
 
 * The main QVCache container
 * A `pgvector` backend container
-* A `Qdrant` backend container
 
 ```bash
 docker compose up -d
@@ -80,37 +79,10 @@ Use the following scripts to build indexes for each backend:
   ./scripts/qvcache/diskann/build_index.sh
   ```
 
-* **FAISS**
-
-  ```bash
-  ./python/scripts/build_index/build_faiss_index.sh
-  ```
-
-* **Qdrant**
-
-  ```bash
-  ./python/scripts/build_index/build_qdrant_index.sh
-  ```
-
 * **pgvector**
 
   ```bash
   ./python/scripts/build_index/build_pgvector_index.sh
-  ```
-
-* **Pinecone**
-
-  ```bash
-  ./python/scripts/build_index/build_pinecone_index.sh
-  ```
-
-  *(Requires a valid Pinecone API key from [https://www.pinecone.io/](https://www.pinecone.io/))*
-
-* **SPANN (SPTAG)**
-
-  ```bash
-  ./backends/SPTAG/build.sh
-  ./backends/SPTAG/build_index.sh
   ```
 
 ---
@@ -132,34 +104,6 @@ Each backend can be evaluated **with** and **without QVCache**.
   ./scripts/qvcache/qvcache_benchmark_diskann.sh
   ```
 
-### FAISS
-
-* Without QVCache:
-
-  ```bash
-  ./python/scripts/benchmark/backend_benchmark_faiss_backend.sh
-  ```
-* With QVCache:
-
-  ```bash
-  ./python/scripts/benchmark/qvcache_benchmark_faiss_backend.sh
-  ```
-
-### Qdrant
-
-* Without QVCache:
-
-  ```bash
-  ./python/scripts/benchmark/backend_benchmark_qdrant_backend.sh
-  ```
-* With QVCache:
-
-  ```bash
-  ./python/scripts/benchmark/qvcache_benchmark_qdrant_backend.sh
-  ```
-
-*(Qdrant container is automatically started during environment setup.)*
-
 ### pgvector
 
 * Without QVCache:
@@ -174,40 +118,6 @@ Each backend can be evaluated **with** and **without QVCache**.
   ```
 
 *(pgvector container is automatically started during environment setup.)*
-
-### Pinecone
-
-* Without QVCache:
-
-  ```bash
-  ./python/scripts/benchmark/backend_benchmark_pinecone_backend.sh
-  ```
-* With QVCache:
-
-  ```bash
-  ./python/scripts/benchmark/qvcache_benchmark_pinecone_backend.sh
-  ```
-
-### SPANN (SPTAG)
-
-Start the SPANN server first:
-
-```bash
-./backends/SPTAG/start_server.sh
-```
-
-Then run benchmarks:
-
-* Without QVCache:
-
-  ```bash
-  ./scripts/qvcache/backend_benchmark_sptag.sh
-  ```
-* With QVCache:
-
-  ```bash
-  ./scripts/qvcache/qvcache_benchmark_sptag.sh
-  ```
 
 ---
 
@@ -280,7 +190,7 @@ class CustomBackend:
 
 ### Complete Example
 
-For a complete, working example that demonstrates proper implementation of all methods including metric handling (L2, cosine, inner product), see [`python/backends/bruteforce_backend.py`](python/backends/bruteforce_backend.py). This file shows:
+For a complete, working example that demonstrates proper implementation of all methods including metric handling (L2, cosine, inner product), see [`python/backends/pgvector_backend.py`](python/backends/pgvector_backend.py). This file shows:
 
 - Proper data loading from binary format
 - Implementation of multiple distance metrics (L2, cosine, inner product)
@@ -289,7 +199,7 @@ For a complete, working example that demonstrates proper implementation of all m
 
 ### Integration with QVCache
 
-Once your backend class is implemented, you can integrate it with QVCache by following the pattern in [`python/benchmarks/qvcache_benchmark_faiss_backend.py`](python/benchmarks/qvcache_benchmark_faiss_backend.py):
+Once your backend class is implemented, you can integrate it with QVCache by following the pattern in [`python/benchmarks/qvcache_benchmark_pgvector_backend.py`](python/benchmarks/qvcache_benchmark_pgvector_backend.py):
 
 ```python
 import qvcache as qvc

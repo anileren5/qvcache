@@ -345,7 +345,7 @@ class PgVectorBackend:
                     # Return as-is (cosine distance)
                     distances.append(float(distance_float))
                 else:  # l2
-                    # Square the L2 distance to match BruteforceBackend format (L2^2)
+                    # Square the L2 distance so it matches sum of squared differences.
                     squared_distance = distance_float * distance_float
                     distances.append(float(squared_distance))
             except (ValueError, TypeError, OverflowError):
