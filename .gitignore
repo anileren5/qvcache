@@ -69,5 +69,8 @@ plots/
 backend_experiments
 dataset_experiments
 
+# Local drafts and papers (keep on disk, do not push)
+papers/
+
 # Third-party dependencies (cloned by build scripts)
 backends/SPTAG/ThirdParty/zstd/
