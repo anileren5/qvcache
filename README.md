@@ -76,48 +76,50 @@ Use the following scripts to build indexes for each backend:
 * **DiskANN**
 
   ```bash
-  ./scripts/qvcache/diskann/build_index.sh
+  ./scripts/diskann/build_index.sh
   ```
 
 * **pgvector**
 
   ```bash
-  ./python/scripts/build_index/build_pgvector_index.sh
+  ./scripts/pgvector/build_index.sh
   ```
 
 ---
 
 ## 6. Query Execution and Benchmarking
 
-Each backend can be evaluated **with** and **without QVCache**.
+Prepare a query stream once, then run the matching Aker or QVCache script.
 
-### DiskANN
+```bash
+./scripts/workload/prepare_workload.sh base
+SKEW=0.99 ./scripts/workload/prepare_workload.sh simzipf
+./scripts/workload/prepare_workload.sh simzipf+
+./scripts/workload/prepare_workload.sh simzipf+2
+```
 
-* Without QVCache:
+### DiskANN (search)
 
-  ```bash
-  ./scripts/qvcache/backend_benchmark_diskann.sh
-  ```
-* With QVCache:
+```bash
+QUERY_STREAM=sim-100k-0.99 ./scripts/aker/diskann_search.sh
+QUERY_STREAM=sim-100k-0.99 ./scripts/qvcache/diskann_search.sh
+```
 
-  ```bash
-  ./scripts/qvcache/qvcache_benchmark_diskann.sh
-  ```
+### pgvector (search)
 
-### pgvector
+```bash
+QUERY_STREAM=sim-100k-0.99 ./scripts/aker/pgvector_search.sh
+QUERY_STREAM=sim-100k-0.99 ./scripts/qvcache/pgvector_search.sh
+```
 
-* Without QVCache:
+### pgvector (refresh)
 
-  ```bash
-  ./python/scripts/benchmark/backend_benchmark_pgvector_backend.sh
-  ```
-* With QVCache:
+```bash
+QUERY_STREAM=sim-100k-0.99 ./scripts/aker/pgvector_refresh.sh
+QUERY_STREAM=sim-100k-0.99 ./scripts/qvcache/pgvector_refresh.sh
+```
 
-  ```bash
-  ./python/scripts/benchmark/qvcache_benchmark_pgvector_backend.sh
-  ```
-
-*(pgvector container is automatically started during environment setup.)*
+*(The pgvector container is started with the environment.)*
 
 ---
 
@@ -199,7 +201,7 @@ For a complete, working example that demonstrates proper implementation of all m
 
 ### Integration with QVCache
 
-Once your backend class is implemented, you can integrate it with QVCache by following the pattern in [`python/benchmarks/qvcache_benchmark_pgvector_backend.py`](python/benchmarks/qvcache_benchmark_pgvector_backend.py):
+Once your backend class is implemented, you can integrate it with QVCache by following the pattern in [`scripts/pgvector/build_index.py`](scripts/pgvector/build_index.py) and the C++ pgvector search script:
 
 ```python
 import qvcache as qvc

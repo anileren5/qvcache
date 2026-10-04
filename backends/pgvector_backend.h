@@ -86,6 +86,13 @@ public:
         }
         const long table_rows = std::strtol(PQgetvalue(res, 0, 0), nullptr, 10);
         PQclear(res);
+        if (table_rows != static_cast<long>(num_vectors_)) {
+            throw std::runtime_error(
+                "pgvector table " + table_name_ + " has " + std::to_string(table_rows) +
+                " rows but " + data_path + " has " + std::to_string(num_vectors_) +
+                " vectors. Reload the table (refresh scripts mutate it): "
+                "DATASET=spacev-small-test TABLE_NAME=spacev_1m ./scripts/pgvector/build_index.sh");
+        }
         std::cout << "PgVectorBackend connected to " << db_host << ":" << db_port
                   << " table=" << table_name_ << " rows=" << table_rows
                   << " local_vectors=" << num_vectors_ << " dim=" << dim_
