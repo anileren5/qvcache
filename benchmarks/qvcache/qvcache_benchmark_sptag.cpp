@@ -346,7 +346,6 @@ void experiment_benchmark(
     uint32_t n_async_insert_threads,
     bool lazy_theta_updates,
     size_t number_of_mini_indexes,
-    bool search_mini_indexes_in_parallel,
     size_t max_search_threads,
     const std::string& search_strategy,
     diskann::Metric metric,
@@ -389,7 +388,6 @@ void experiment_benchmark(
        n_async_insert_threads,
        lazy_theta_updates,
        number_of_mini_indexes,
-       search_mini_indexes_in_parallel,
        max_search_threads,
        metric,
        std::move(sptag_backend),
@@ -397,19 +395,13 @@ void experiment_benchmark(
        query_path
     );
 
-    if (search_strategy == "SEQUENTIAL_LRU_STOP_FIRST_HIT") {
-        qvcache.set_search_strategy(qvcache::QVCache<T>::SearchStrategy::SEQUENTIAL_LRU_STOP_FIRST_HIT);
-    } else if (search_strategy == "SEQUENTIAL_LRU_ADAPTIVE") {
-        qvcache.set_search_strategy(qvcache::QVCache<T>::SearchStrategy::SEQUENTIAL_LRU_ADAPTIVE);
-        qvcache.enable_adaptive_strategy(true);
-        qvcache.set_hit_ratio_window_size(100);
-        qvcache.set_hit_ratio_threshold(0.90);
-    } else if (search_strategy == "SEQUENTIAL_ALL") {
-        qvcache.set_search_strategy(qvcache::QVCache<T>::SearchStrategy::SEQUENTIAL_ALL);
+    if (search_strategy == "SEQUENTIAL") {
+        qvcache.set_search_strategy(qvcache::QVCache<T>::SearchStrategy::SEQUENTIAL);
     } else if (search_strategy == "PARALLEL") {
         qvcache.set_search_strategy(qvcache::QVCache<T>::SearchStrategy::PARALLEL);
     } else {
-        std::cerr << "Unknown search strategy: " << search_strategy << std::endl;
+        std::cerr << "Unknown search strategy: " << search_strategy
+                  << " (expected SEQUENTIAL or PARALLEL)" << std::endl;
         exit(1);
     }
 
@@ -557,9 +549,8 @@ int main(int argc, char **argv) {
     uint32_t n_async_insert_threads = 4;
     bool lazy_theta_updates = true;
     size_t number_of_mini_indexes = 2;
-    bool search_mini_indexes_in_parallel = false;
     size_t max_search_threads = 32;
-    std::string search_strategy = "SEQUENTIAL_LRU_STOP_FIRST_HIT";
+    std::string search_strategy = "SEQUENTIAL";
     std::string metric_str = "l2";
     std::string sptag_server_addr = "sptag";
     std::string sptag_server_port = "8000";
@@ -598,9 +589,8 @@ int main(int argc, char **argv) {
             ("n_async_insert_threads", po::value<uint32_t>(&n_async_insert_threads)->default_value(4), "Number of async insert threads")
             ("lazy_theta_updates", po::value<bool>(&lazy_theta_updates)->default_value(true), "Enable lazy theta updates (true) or immediate updates (false)")
             ("number_of_mini_indexes", po::value<size_t>(&number_of_mini_indexes)->default_value(2), "Number of mini indexes for shadow cycling")
-            ("search_mini_indexes_in_parallel", po::value<bool>(&search_mini_indexes_in_parallel)->default_value(false), "Search mini indexes in parallel (true) or sequential (false)")
             ("max_search_threads", po::value<size_t>(&max_search_threads)->default_value(32), "Maximum threads for parallel search")
-            ("search_strategy", po::value<std::string>(&search_strategy)->default_value("SEQUENTIAL_LRU_STOP_FIRST_HIT"), "Search strategy: SEQUENTIAL_LRU_STOP_FIRST_HIT, SEQUENTIAL_LRU_ADAPTIVE, SEQUENTIAL_ALL, PARALLEL")
+            ("search_strategy", po::value<std::string>(&search_strategy)->default_value("SEQUENTIAL"), "Search strategy: SEQUENTIAL or PARALLEL")
             ("metric", po::value<std::string>(&metric_str)->default_value("l2"), "Distance metric: l2, cosine, or inner_product")
             ("sptag_server_addr", po::value<std::string>(&sptag_server_addr)->default_value("sptag"), "SPTAG server address")
             ("sptag_server_port", po::value<std::string>(&sptag_server_port)->default_value("8000"), "SPTAG server port")
@@ -664,7 +654,6 @@ int main(int argc, char **argv) {
         "  \"n_async_insert_threads\": {},\n"
         "  \"lazy_theta_updates\": {},\n"
         "  \"number_of_mini_indexes\": {},\n"
-        "  \"search_mini_indexes_in_parallel\": {},\n"
         "  \"max_search_threads\": {},\n"
         "  \"search_strategy\": \"{}\",\n"
         "  \"metric\": \"{}\",\n"
@@ -677,28 +666,28 @@ int main(int argc, char **argv) {
         "  \"n_round\": {},\n"
         "  \"learn_pca_from_queries\": {}\n"
         "}}",
-        data_type, data_path, query_path, groundtruth_path, memory_L, K, B, M, search_threads, alpha, use_reconstructed_vectors, p, deviation_factor, sector_len, use_regional_theta, pca_dim, buckets_per_dim, memory_index_max_points, max_regions, n_splits, n_split_repeat, n_async_insert_threads, lazy_theta_updates, number_of_mini_indexes, search_mini_indexes_in_parallel, max_search_threads, search_strategy, metric_str, sptag_server_addr, sptag_server_port, vector_dim, window_size, n_repeat, stride, n_round, learn_pca_from_queries);
+        data_type, data_path, query_path, groundtruth_path, memory_L, K, B, M, search_threads, alpha, use_reconstructed_vectors, p, deviation_factor, sector_len, use_regional_theta, pca_dim, buckets_per_dim, memory_index_max_points, max_regions, n_splits, n_split_repeat, n_async_insert_threads, lazy_theta_updates, number_of_mini_indexes, max_search_threads, search_strategy, metric_str, sptag_server_addr, sptag_server_port, vector_dim, window_size, n_repeat, stride, n_round, learn_pca_from_queries);
     if (data_type == "float") {
         if (vector_dim == 0) {
             size_t num_vectors, dim;
             diskann::get_bin_metadata(data_path, num_vectors, dim);
             vector_dim = dim;
         }
-        experiment_benchmark<float>(data_type, data_path, query_path, groundtruth_path, memory_L, K, B, M, alpha, search_threads, use_reconstructed_vectors, p, deviation_factor, memory_index_max_points, use_regional_theta, pca_dim, buckets_per_dim, max_regions, n_splits, n_split_repeat, n_async_insert_threads, lazy_theta_updates, number_of_mini_indexes, search_mini_indexes_in_parallel, max_search_threads, search_strategy, metric, sptag_server_addr, sptag_server_port, vector_dim, window_size, n_repeat, stride, n_round, (bool)learn_pca_from_queries);
+        experiment_benchmark<float>(data_type, data_path, query_path, groundtruth_path, memory_L, K, B, M, alpha, search_threads, use_reconstructed_vectors, p, deviation_factor, memory_index_max_points, use_regional_theta, pca_dim, buckets_per_dim, max_regions, n_splits, n_split_repeat, n_async_insert_threads, lazy_theta_updates, number_of_mini_indexes, max_search_threads, search_strategy, metric, sptag_server_addr, sptag_server_port, vector_dim, window_size, n_repeat, stride, n_round, (bool)learn_pca_from_queries);
     } else if (data_type == "int8") {
         if (vector_dim == 0) {
             size_t num_vectors, dim;
             diskann::get_bin_metadata(data_path, num_vectors, dim);
             vector_dim = dim;
         }
-        experiment_benchmark<int8_t>(data_type, data_path, query_path, groundtruth_path, memory_L, K, B, M, alpha, search_threads, use_reconstructed_vectors, p, deviation_factor, memory_index_max_points, use_regional_theta, pca_dim, buckets_per_dim, max_regions, n_splits, n_split_repeat, n_async_insert_threads, lazy_theta_updates, number_of_mini_indexes, search_mini_indexes_in_parallel, max_search_threads, search_strategy, metric, sptag_server_addr, sptag_server_port, vector_dim, window_size, n_repeat, stride, n_round, (bool)learn_pca_from_queries);
+        experiment_benchmark<int8_t>(data_type, data_path, query_path, groundtruth_path, memory_L, K, B, M, alpha, search_threads, use_reconstructed_vectors, p, deviation_factor, memory_index_max_points, use_regional_theta, pca_dim, buckets_per_dim, max_regions, n_splits, n_split_repeat, n_async_insert_threads, lazy_theta_updates, number_of_mini_indexes, max_search_threads, search_strategy, metric, sptag_server_addr, sptag_server_port, vector_dim, window_size, n_repeat, stride, n_round, (bool)learn_pca_from_queries);
     } else if (data_type == "uint8") {
         if (vector_dim == 0) {
             size_t num_vectors, dim;
             diskann::get_bin_metadata(data_path, num_vectors, dim);
             vector_dim = dim;
         }
-        experiment_benchmark<uint8_t>(data_type, data_path, query_path, groundtruth_path, memory_L, K, B, M, alpha, search_threads, use_reconstructed_vectors, p, deviation_factor, memory_index_max_points, use_regional_theta, pca_dim, buckets_per_dim, max_regions, n_splits, n_split_repeat, n_async_insert_threads, lazy_theta_updates, number_of_mini_indexes, search_mini_indexes_in_parallel, max_search_threads, search_strategy, metric, sptag_server_addr, sptag_server_port, vector_dim, window_size, n_repeat, stride, n_round, (bool)learn_pca_from_queries);
+        experiment_benchmark<uint8_t>(data_type, data_path, query_path, groundtruth_path, memory_L, K, B, M, alpha, search_threads, use_reconstructed_vectors, p, deviation_factor, memory_index_max_points, use_regional_theta, pca_dim, buckets_per_dim, max_regions, n_splits, n_split_repeat, n_async_insert_threads, lazy_theta_updates, number_of_mini_indexes, max_search_threads, search_strategy, metric, sptag_server_addr, sptag_server_port, vector_dim, window_size, n_repeat, stride, n_round, (bool)learn_pca_from_queries);
     } else {
         std::cerr << "Unsupported data type: " << data_type << std::endl;
     }

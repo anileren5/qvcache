@@ -50,7 +50,6 @@ def experiment_benchmark(data_path: str,
     n_async_insert_threads: int,
     lazy_theta_updates: bool,
     number_of_mini_indexes: int,
-    search_mini_indexes_in_parallel: bool,
     max_search_threads: int,
     search_strategy: str,
     backend: QdrantBackend,
@@ -85,21 +84,13 @@ def experiment_benchmark(data_path: str,
         n_async_insert_threads=n_async_insert_threads,
         lazy_theta_updates=lazy_theta_updates,
         number_of_mini_indexes=number_of_mini_indexes,
-        search_mini_indexes_in_parallel=search_mini_indexes_in_parallel,
         max_search_threads=max_search_threads,
         backend=backend
     )
     
     # Set search strategy
-    if search_strategy == "SEQUENTIAL_LRU_STOP_FIRST_HIT":
-        qvcache.set_search_strategy(qvc.SearchStrategy.SEQUENTIAL_LRU_STOP_FIRST_HIT)
-    elif search_strategy == "SEQUENTIAL_LRU_ADAPTIVE":
-        qvcache.set_search_strategy(qvc.SearchStrategy.SEQUENTIAL_LRU_ADAPTIVE)
-        qvcache.enable_adaptive_strategy(True)
-        qvcache.set_hit_ratio_window_size(100)
-        qvcache.set_hit_ratio_threshold(0.90)
-    elif search_strategy == "SEQUENTIAL_ALL":
-        qvcache.set_search_strategy(qvc.SearchStrategy.SEQUENTIAL_ALL)
+    if search_strategy == "SEQUENTIAL":
+        qvcache.set_search_strategy(qvc.SearchStrategy.SEQUENTIAL)
     elif search_strategy == "PARALLEL":
         qvcache.set_search_strategy(qvc.SearchStrategy.PARALLEL)
     else:
@@ -267,11 +258,9 @@ def main():
     parser.add_argument("--n_async_insert_threads", type=int, default=16, help="Async insert threads")
     parser.add_argument("--lazy_theta_updates", type=bool, default=True, help="Lazy theta updates")
     parser.add_argument("--number_of_mini_indexes", type=int, default=4, help="Number of mini indexes")
-    parser.add_argument("--search_mini_indexes_in_parallel", type=bool, default=False, help="Search mini indexes in parallel")
     parser.add_argument("--max_search_threads", type=int, default=32, help="Max search threads")
-    parser.add_argument("--search_strategy", type=str, default="SEQUENTIAL_LRU_ADAPTIVE",
-                       choices=["SEQUENTIAL_LRU_STOP_FIRST_HIT", "SEQUENTIAL_LRU_ADAPTIVE",
-                               "SEQUENTIAL_ALL", "PARALLEL"],
+    parser.add_argument("--search_strategy", type=str, default="SEQUENTIAL",
+                       choices=["SEQUENTIAL", "PARALLEL"],
                        help="Search strategy")
     parser.add_argument("--data_type", type=str, default="float", help="Data type")
     parser.add_argument("--metric", type=str, default="l2", choices=["l2", "cosine", "inner_product"],
@@ -318,7 +307,6 @@ def main():
         "n_async_insert_threads": args.n_async_insert_threads,
         "lazy_theta_updates": args.lazy_theta_updates,
         "number_of_mini_indexes": args.number_of_mini_indexes,
-        "search_mini_indexes_in_parallel": args.search_mini_indexes_in_parallel,
         "max_search_threads": args.max_search_threads,
         "search_strategy": args.search_strategy,
         "metric": args.metric,
@@ -355,7 +343,7 @@ def main():
         args.n_splits, args.n_split_repeat,
         args.n_async_insert_threads,
         args.lazy_theta_updates, args.number_of_mini_indexes,
-        args.search_mini_indexes_in_parallel, args.max_search_threads,
+        args.max_search_threads,
         args.search_strategy, backend, args.collection_name,
         args.window_size, args.n_repeat, args.stride, args.n_round,
         args.qdrant_url

@@ -54,9 +54,8 @@ MAX_REGIONS=1000000
 N_ASYNC_INSERT_THREADS=4
 LAZY_THETA_UPDATES=1
 NUMBER_OF_MINI_INDEXES=4
-SEARCH_MINI_INDEXES_IN_PARALLEL="${SEARCH_MINI_INDEXES_IN_PARALLEL:-true}"
 MAX_SEARCH_THREADS="${MAX_SEARCH_THREADS:-32}"
-SEARCH_STRATEGY="${SEARCH_STRATEGY:-SEQUENTIAL_LRU_ADAPTIVE}"
+SEARCH_STRATEGY="${SEARCH_STRATEGY:-SEQUENTIAL}"
 METRIC="l2"
 
 if [ ! -f "$QUERY_PATH" ] || [ ! -f "$DATA_PATH" ]; then
@@ -79,7 +78,7 @@ echo "QVCache search-workload - DiskANN"
 echo "=========================================="
 echo "Dataset: $DATASET ($DATA_TYPE)"
 echo "Query stream: $QUERY_STREAM"
-echo "Search strategy: $SEARCH_STRATEGY (parallel flag: $SEARCH_MINI_INDEXES_IN_PARALLEL)"
+echo "Search strategy: $SEARCH_STRATEGY"
 echo "Query file: $QUERY_PATH"
 echo "Groundtruth file: $GROUNDTRUTH_PATH"
 echo "Report interval: $REPORT_INTERVAL queries"
@@ -118,7 +117,6 @@ echo ""
   --n_async_insert_threads "$N_ASYNC_INSERT_THREADS" \
   --lazy_theta_updates "$LAZY_THETA_UPDATES" \
   --number_of_mini_indexes "$NUMBER_OF_MINI_INDEXES" \
-  --search_mini_indexes_in_parallel "$SEARCH_MINI_INDEXES_IN_PARALLEL" \
   --max_search_threads "$MAX_SEARCH_THREADS" \
   --search_strategy "$SEARCH_STRATEGY" \
   --metric "$METRIC" \

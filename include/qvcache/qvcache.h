@@ -8,7 +8,6 @@
 #include "qvcache/pca_utils.h"
 #include "qvcache/lru_cache.h"
 #include "qvcache/backend_interface.h"
-#include "qvcache/hit_rate_tracker.h" 
 
 // System headers
 #include <cstdint>
@@ -64,7 +63,6 @@ namespace qvcache {
 
             uint32_t n_async_insert_threads = 4;
             bool lazy_theta_updates = true;
-            bool search_mini_indexes_in_parallel = false; // Control parallel vs sequential search
             size_t max_search_threads = 32; // Maximum threads for parallel search (should be > query processing threads)
             // Declared after memory_indices so the pool joins before those indexes are destroyed.
             std::unique_ptr<SearchThreadPool> search_pool;
@@ -107,21 +105,12 @@ namespace qvcache {
         public:
             // Configuration option to choose search strategy
             enum class SearchStrategy {
-                SEQUENTIAL_LRU_STOP_FIRST_HIT,  // Problematic: Stop at first hit in LRU order (causes recall drops)
-                SEQUENTIAL_LRU_ADAPTIVE,  // Adaptive: Monitor hit ratio, switch to SEQUENTIAL_ALL when low
-                SEQUENTIAL_ALL,           // Search all indices sequentially, pick best result
-                PARALLEL                  // Parallel search (existing implementation)
+                SEQUENTIAL,  // Search every mini-index, then merge
+                PARALLEL     // Same merge, searches run on the fixed pool
             };
 
         private:
-            // Search strategy for the public search method
-            SearchStrategy search_strategy = SearchStrategy::SEQUENTIAL_LRU_STOP_FIRST_HIT;
-            
-            // Hit ratio monitoring for adaptive strategy - using HitRateTracker (already thread-safe)
-            mutable std::mutex hit_rate_tracker_mutex;  // Protect tracker pointer and initialization
-            std::unique_ptr<HitRateTracker> hit_rate_tracker;  // Thread-safe hit rate tracker
-            std::atomic<bool> use_adaptive_strategy{false};  // Whether to use adaptive behavior
-            std::atomic<double> hit_ratio_threshold{0.90};  // Threshold for switching strategies (cached for fast access)
+            SearchStrategy search_strategy = SearchStrategy::SEQUENTIAL;
 
             // Helper function to create a memory index with given max points
             std::unique_ptr<diskann::AbstractIndex> create_memory_index(size_t max_points) {
@@ -228,60 +217,46 @@ namespace qvcache {
             }
 
             void perform_eviction() {
-                // Debug: Show current LRU order before eviction
                 std::vector<size_t> current_lru_order = lru_cache->get_all_tags();
-                std::cout << "[LRU Eviction] Current LRU order before eviction: ";
-                for (size_t idx : current_lru_order) {
-                    std::cout << idx << " ";
-                }
-                std::cout << std::endl;
-                
-                // Get the least recently used index ID from LRU cache
                 std::vector<size_t> lru_tags = lru_cache->get_lru_tags(1);
+                size_t replaced_id = std::numeric_limits<size_t>::max();
+                bool touch_lru = false;
+
                 if (lru_tags.empty()) {
-                    // Fallback to cycling if LRU cache is empty
                     size_t current_active_id = active_insert_index_id.load();
-                    size_t next_active_id = (current_active_id + 1) % number_of_mini_indexes;
-                    std::cout << "[LRU Eviction] Fallback: Evicting index " << next_active_id << std::endl;
-                    memory_indices[next_active_id] = create_memory_index(memory_index_max_points_per_index);
-                    active_insert_index_id.store(next_active_id);
+                    replaced_id = (current_active_id + 1) % number_of_mini_indexes;
                 } else {
-                    size_t lru_index_id = lru_tags[0];
-                    
-                    // Check if this is the only index in the cache
+                    replaced_id = lru_tags[0];
                     if (current_lru_order.size() == 1) {
-                        // If only one index remains, don't evict it - this prevents infinite eviction loop
-                        std::cout << "[LRU Eviction] Only one index remaining (" << lru_index_id << "), skipping eviction to prevent infinite loop" << std::endl;
+                        std::cout << "[LRU] Only one index remaining (" << replaced_id
+                                  << "), skipping rotation" << std::endl;
                         eviction_in_progress.store(false);
                         return;
                     }
-                    
-                    std::cout << "[LRU Eviction] Evicting least recently used index: " << lru_index_id << std::endl;
-                    memory_indices[lru_index_id] = create_memory_index(memory_index_max_points_per_index);
-                    active_insert_index_id.store(lru_index_id);
-                    // STEP 3: Remove the evicted index from LRU cache and add the new active index
-                    // Note: We don't need to explicitly evict since we're replacing the same index ID
-                    lru_cache->access(lru_index_id); // This will move the index to front (most recently used)
+                    touch_lru = true;
                 }
-                
-                // Debug: Show new LRU order after eviction
-                std::vector<size_t> new_lru_order = lru_cache->get_all_tags();
-                std::cout << "[LRU Eviction] New LRU order after eviction: ";
-                for (size_t idx : new_lru_order) {
-                    std::cout << idx << " ";
+
+                const size_t dropped = (replaced_id < memory_indices.size() && memory_indices[replaced_id])
+                    ? memory_indices[replaced_id]->get_number_of_active_vectors()
+                    : 0;
+                memory_indices[replaced_id] = create_memory_index(memory_index_max_points_per_index);
+                active_insert_index_id.store(replaced_id);
+                if (touch_lru) {
+                    lru_cache->access(replaced_id);
                 }
-                std::cout << std::endl;
-                std::cout << "[LRU Eviction] LRU cache size: " << lru_cache->size() << "/" << lru_cache->max_capacity() << std::endl;
-                
-                // Ensure all indices are present in the LRU cache
+                // Replacing an empty shard only moves the insert target. Log when vectors are dropped.
+                if (dropped > 0) {
+                    std::cout << "[LRU Eviction] Replaced index " << replaced_id
+                              << ", dropped " << dropped << " vectors" << std::endl;
+                }
+
                 for (size_t i = 0; i < number_of_mini_indexes; ++i) {
                     if (!lru_cache->contains(i)) {
-                        std::cout << "[LRU Eviction] Warning: Index " << i << " missing from LRU cache, adding it" << std::endl;
+                        std::cout << "[LRU] Index " << i << " missing from LRU order, adding it" << std::endl;
                         lru_cache->access(i);
                     }
                 }
-                
-                // Eviction complete
+
                 eviction_in_progress.store(false);
             }
 
@@ -955,68 +930,8 @@ namespace qvcache {
 
 
 
-            // Problematic search strategy: stop at first hit in LRU order (causes recall drops)
-            bool search_sequential_lru_stop_first_hit(const T* query_ptr, uint32_t K, uint32_t* query_result_tags_ptr, std::vector<T *>& res, float* query_result_dists_ptr, void* backend_stats) {
-                std::vector<size_t> lru_order = lru_cache->get_all_tags();
-                
-                for (size_t index_id : lru_order) {
-                    if (index_id >= memory_indices.size()) {
-                        continue;  // Safety check
-                    }
-                    
-                    if (memory_indices[index_id]->get_number_of_active_vectors() > 0) {
-                        // Use local temp res to avoid issues with passed-in res vector
-                        // This ensures clean state for each search
-                        std::vector<T*> temp_res;
-                        size_t num_results = memory_indices[index_id]->search_with_tags(query_ptr, K, memory_L, query_result_tags_ptr, query_result_dists_ptr, temp_res);
-                        
-                        // Copy to output res if hit (temp_res will be destroyed but pointers are still valid)
-                        bool is_hit = this->isHit(query_ptr, K, query_result_dists_ptr,
-                                                  query_result_tags_ptr, num_results);
-                        
-                        // Only update LRU cache if this search resulted in a hit
-                        if (is_hit) {
-                            // Copy temp_res to res (pointers are still valid at this point)
-                            res = temp_res;
-                            lru_cache->access(index_id);
-                            return true; // Found a hit, stop immediately (this was the problem!)
-                        }
-                    }
-                }
-                
-                // No hit found - ensure res is empty
-                res.clear();
-                handle_backend_miss(query_ptr, K, query_result_tags_ptr, query_result_dists_ptr, backend_stats);
-                return false;
-            }
-
-            // Adaptive search strategy: monitor hit ratio and switch to SEQUENTIAL_ALL when low
-            bool search_adaptive_hit_ratio(const T* query_ptr, uint32_t K, uint32_t* query_result_tags_ptr, std::vector<T *>& res, float* query_result_dists_ptr, void* backend_stats) {
-                // Check if we should use adaptive strategy (hit ratio is low)
-                bool use_adaptive = should_use_adaptive_strategy();
-                
-                bool was_hit;
-                
-                // Clear res vector to ensure clean state regardless of previous call
-                // This prevents stale pointers when switching between strategies
-                res.clear();
-                
-                if (use_adaptive) {
-                    // Use SEQUENTIAL_ALL strategy when hit ratio is low
-                    was_hit = search_sequential_all_impl(query_ptr, K, query_result_tags_ptr, res, query_result_dists_ptr, backend_stats);
-                } else {
-                    // Use SEQUENTIAL_LRU_STOP_FIRST_HIT strategy when hit ratio is good
-                    was_hit = search_sequential_lru_stop_first_hit(query_ptr, K, query_result_tags_ptr, res, query_result_dists_ptr, backend_stats);
-                }
-                
-                // Update hit history for monitoring
-                update_hit_history(was_hit);
-                
-                return was_hit;
-            }
-            
-            // Helper method for SEQUENTIAL_ALL implementation with merge and re-rank
-            bool search_sequential_all_impl(const T* query_ptr, uint32_t K, uint32_t* query_result_tags_ptr, std::vector<T *>& res, float* query_result_dists_ptr, void* backend_stats) {
+            // Search every mini-index, then merge and re-rank.
+            bool search_sequential(const T* query_ptr, uint32_t K, uint32_t* query_result_tags_ptr, std::vector<T *>& res, float* query_result_dists_ptr, void* backend_stats) {
                 std::vector<size_t> lru_order = lru_cache->get_all_tags();
                 
                 // Collect results from all indices
@@ -1056,7 +971,7 @@ namespace qvcache {
                 }
                 
                 // Fast path: if only one index has results, use it directly (no merge needed)
-                // This matches STOP_FIRST behavior exactly for single-index case
+                // Single live index: its result is the merged result.
                 if (searched_index_ids.size() == 1) {
                     size_t single_index_id = searched_index_ids[0];
                     if (single_index_id < all_tags.size() && single_index_id < all_dists.size() && 
@@ -1112,9 +1027,7 @@ namespace qvcache {
                     }
                 }
                 
-                // Merged result didn't pass hit check, try individual indices as fallback
-                // This ensures we don't lose recall compared to STOP_FIRST_HIT
-                // Check in LRU order (matching STOP_FIRST_HIT behavior)
+                // Merged result missed. Fall back to the first individual index that hits, in LRU order.
                 for (size_t index_id : lru_order) {
                     // Skip if this index wasn't searched or doesn't have results
                     if (std::find(searched_index_ids.begin(), searched_index_ids.end(), index_id) == searched_index_ids.end()) {
@@ -1133,8 +1046,7 @@ namespace qvcache {
                         bool is_hit = this->isHit(query_ptr, K, dists.data(), tags.data(), tags.size());
                         
                         if (is_hit) {
-                            // Use results from this index directly (it's already a hit)
-                            // This matches STOP_FIRST_HIT behavior - use first hit in LRU order
+                            // Use this index's result. It is already a hit.
                             std::copy(tags.begin(), tags.begin() + K, query_result_tags_ptr);
                             std::copy(dists.begin(), dists.begin() + K, query_result_dists_ptr);
                             res.resize(K);
@@ -1232,7 +1144,6 @@ namespace qvcache {
                         uint32_t n_async_insert_threads_ = 4,
                         bool lazy_theta_updates_ = true,
                         size_t number_of_mini_indexes_ = 2,
-                        bool search_mini_indexes_in_parallel_ = false,
                         size_t max_search_threads_ = 32,
                         diskann::Metric metric_ = diskann::L2,
                         std::unique_ptr<BackendInterface<T, TagT>> disk_backend_ptr = nullptr,
@@ -1251,7 +1162,6 @@ namespace qvcache {
                         memory_index_max_points_per_index(memory_index_max_points / number_of_mini_indexes_), // Equal capacity per index
                         n_async_insert_threads(n_async_insert_threads_),
                         lazy_theta_updates(lazy_theta_updates_),
-                        search_mini_indexes_in_parallel(search_mini_indexes_in_parallel_),
                         max_search_threads(max_search_threads_),
                         metric(metric_),
                         backend(std::move(disk_backend_ptr))
@@ -1281,13 +1191,12 @@ namespace qvcache {
                 std::cout << "QVCache LRU-managed memory indices built successfully!" << std::endl;
                 std::cout << "Created " << number_of_mini_indexes << " indices, each can hold up to " << memory_index_max_points_per_index << " vectors" << std::endl;
                 std::cout << "LRU eviction policy enabled" << std::endl;
-                if (search_mini_indexes_in_parallel && number_of_mini_indexes > 1) {
+                if (number_of_mini_indexes > 1) {
                     const size_t pool_threads = std::min(max_search_threads, number_of_mini_indexes);
                     if (pool_threads > 1) {
                         search_pool = std::make_unique<SearchThreadPool>(pool_threads);
+                        std::cout << "Mini-index search pool: " << search_pool->size() << " threads" << std::endl;
                     }
-                    std::cout << "Parallel search enabled with a fixed pool of "
-                              << (search_pool ? search_pool->size() : 0) << " threads" << std::endl;
                 }
 
                 std::cout << "QVCache disk index built successfully!" << std::endl;
@@ -1381,9 +1290,6 @@ namespace qvcache {
                     theta_map[100] = init_value;
                 }
                 
-                // Initialize hit rate tracker (lazy initialization - only when adaptive strategy is enabled)
-                // Will be created when enable_adaptive_strategy(true) is called
-                hit_rate_tracker = nullptr;
             }
 
 
@@ -1396,18 +1302,10 @@ namespace qvcache {
                 // Search all memory indices based on configured strategy
                 bool is_hit = false;
                 
-                if (search_strategy == SearchStrategy::PARALLEL && search_mini_indexes_in_parallel && number_of_mini_indexes > 1) {
+                if (search_strategy == SearchStrategy::PARALLEL && search_pool) {
                     is_hit = parallel_search_memory_indices(query_ptr, K, query_result_tags_ptr, res, query_result_dists_ptr);
-
-                } else if (search_strategy == SearchStrategy::SEQUENTIAL_LRU_STOP_FIRST_HIT) {
-                    return search_sequential_lru_stop_first_hit(query_ptr, K, query_result_tags_ptr, res, query_result_dists_ptr, backend_stats);
-                } else if (search_strategy == SearchStrategy::SEQUENTIAL_LRU_ADAPTIVE) {
-                    return search_adaptive_hit_ratio(query_ptr, K, query_result_tags_ptr, res, query_result_dists_ptr, backend_stats);
-                } else if (search_strategy == SearchStrategy::SEQUENTIAL_ALL) {
-                    return search_sequential_all_impl(query_ptr, K, query_result_tags_ptr, res, query_result_dists_ptr, backend_stats);
                 } else {
-                    // Fallback: use SEQUENTIAL_ALL implementation
-                    return search_sequential_all_impl(query_ptr, K, query_result_tags_ptr, res, query_result_dists_ptr, backend_stats);
+                    return search_sequential(query_ptr, K, query_result_tags_ptr, res, query_result_dists_ptr, backend_stats);
                 }
                 
                 if (is_hit) {
@@ -1458,7 +1356,7 @@ namespace qvcache {
             }
 
             bool is_parallel_search_enabled() const {
-                return search_mini_indexes_in_parallel;
+                return search_strategy == SearchStrategy::PARALLEL && search_pool != nullptr;
             }
 
             size_t get_max_search_threads() const {
@@ -1498,102 +1396,7 @@ namespace qvcache {
             SearchStrategy get_search_strategy() const {
                 return search_strategy;
             }
-            
-            // Hit ratio monitoring methods - direct approach using HitRateTracker (already thread-safe)
-            // HitRateTracker uses its own internal mutex, so it's safe to call from multiple threads
-            // But we need to protect the pointer itself from being deleted while in use
-            void update_hit_history(bool was_hit) {
-                std::lock_guard<std::mutex> lock(hit_rate_tracker_mutex);
-                if (!hit_rate_tracker) {
-                    return;  // Tracker not initialized, skip silently
-                }
-                
-                // Direct call - HitRateTracker is already thread-safe with its own mutex
-                // Lock protects the pointer, HitRateTracker's mutex protects its data
-                try {
-                    hit_rate_tracker->record_request(was_hit);
-                } catch (...) {
-                    // Ignore any exceptions - don't let hit tracking break the search
-                }
-            }
-            
-            double get_current_hit_ratio() const {
-                std::lock_guard<std::mutex> lock(hit_rate_tracker_mutex);
-                if (!hit_rate_tracker) {
-                    return 1.0;  // Assume good hit ratio if tracker not initialized
-                }
-                
-                try {
-                    return hit_rate_tracker->get_hit_rate();
-                } catch (...) {
-                    // If tracker access fails, assume good hit ratio (conservative)
-                    return 1.0;
-                }
-            }
-            
-            bool should_use_adaptive_strategy() const {
-                // Read atomic flag without lock (lock-free read)
-                if (!use_adaptive_strategy.load(std::memory_order_acquire)) {
-                    return false;
-                }
-                
-                // Get local copy of tracker pointer while holding lock
-                HitRateTracker* tracker_ptr = nullptr;
-                {
-                    std::lock_guard<std::mutex> lock(hit_rate_tracker_mutex);
-                    if (!hit_rate_tracker) {
-                        // Tracker not initialized, don't switch to adaptive
-                        return false;
-                    }
-                    tracker_ptr = hit_rate_tracker.get();  // Get raw pointer while mutex is held
-                }
-                // Mutex released here, but tracker_ptr is valid as long as we're not recreating
-                
-                try {
-                    // Use local pointer - HitRateTracker is thread-safe internally
-                    // Note: There's a small window where tracker could be recreated, but that's rare
-                    // and HitRateTracker's internal mutex protects its data
-                    double current_hit_ratio = tracker_ptr->get_hit_rate();
-                    double threshold = hit_ratio_threshold.load(std::memory_order_acquire);
-                    
-                    // Sanity check on threshold
-                    if (threshold <= 0.0 || threshold > 1.0) {
-                        return false;  // Invalid threshold, don't switch
-                    }
-                    
-                    // Sanity check on hit ratio (should be between 0 and 1)
-                    if (current_hit_ratio < 0.0 || current_hit_ratio > 1.0) {
-                        return false;  // Invalid hit ratio, don't switch
-                    }
-                    
-                    return current_hit_ratio < threshold;
-                } catch (...) {
-                    // If any error occurs, don't switch to adaptive (conservative)
-                    return false;
-                }
-            }
-            
-            // Configuration methods for adaptive strategy
-            void set_hit_ratio_window_size(size_t new_window_size) {
-                std::lock_guard<std::mutex> lock(hit_rate_tracker_mutex);
-                double threshold = hit_ratio_threshold.load(std::memory_order_acquire);
-                // Create new tracker with new window size (protected by mutex)
-                hit_rate_tracker = std::make_unique<HitRateTracker>(new_window_size, threshold);
-            }
-            
-            void set_hit_ratio_threshold(double threshold) {
-                hit_ratio_threshold.store(threshold, std::memory_order_release);
-                std::lock_guard<std::mutex> lock(hit_rate_tracker_mutex);
-                // Update tracker if it exists (recreate with new threshold, protected by mutex)
-                if (hit_rate_tracker) {
-                    // Save window size before destroying tracker
-                    size_t window_size = hit_rate_tracker->get_window_size();
-                    // Destroy old tracker and create new one (protected by mutex)
-                    hit_rate_tracker.reset();
-                    hit_rate_tracker = std::make_unique<HitRateTracker>(window_size, threshold);
-                }
-            }
-            
+
             // Writes do not evict to make room. θ ← α·θ on v's 16-D cell.
             void insert(TagT id, const T* vector) {
                 {
@@ -1656,20 +1459,6 @@ namespace qvcache {
             bool backend_supports_updates() const {
                 return backend && backend->supports_updates();
             }
-
-            void enable_adaptive_strategy(bool enable) {
-                use_adaptive_strategy.store(enable, std::memory_order_release);
-                
-                std::lock_guard<std::mutex> lock(hit_rate_tracker_mutex);
-                if (enable && !hit_rate_tracker) {
-                    // Initialize tracker with default values (will be configured by set_hit_ratio_window_size/threshold)
-                    double threshold = hit_ratio_threshold.load(std::memory_order_acquire);
-                    hit_rate_tracker = std::make_unique<HitRateTracker>(100, threshold);  // Default window size 100
-                }
-                // Don't clear tracker when disabled - keep it for potential re-enabling
-            }
-            
-
 
     };
 }

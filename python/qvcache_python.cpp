@@ -57,9 +57,7 @@ PYBIND11_MODULE(qvcache, m) {
 
     // Bind SearchStrategy enum
     py::enum_<QVCache<float>::SearchStrategy>(m, "SearchStrategy")
-        .value("SEQUENTIAL_LRU_STOP_FIRST_HIT", QVCache<float>::SearchStrategy::SEQUENTIAL_LRU_STOP_FIRST_HIT)
-        .value("SEQUENTIAL_LRU_ADAPTIVE", QVCache<float>::SearchStrategy::SEQUENTIAL_LRU_ADAPTIVE)
-        .value("SEQUENTIAL_ALL", QVCache<float>::SearchStrategy::SEQUENTIAL_ALL)
+        .value("SEQUENTIAL", QVCache<float>::SearchStrategy::SEQUENTIAL)
         .value("PARALLEL", QVCache<float>::SearchStrategy::PARALLEL);
 
     // Bind QVCache for float
@@ -73,7 +71,7 @@ PYBIND11_MODULE(qvcache, m) {
                          bool use_regional_theta, size_t pca_dim, size_t buckets_per_dim,
                          size_t max_regions,
                          uint32_t n_async_insert_threads, bool lazy_theta_updates,
-                         size_t number_of_mini_indexes, bool search_mini_indexes_in_parallel,
+                         size_t number_of_mini_indexes,
                          size_t max_search_threads, diskann::Metric metric,
                          py::object python_backend) {
             if (python_backend.is_none()) {
@@ -83,7 +81,7 @@ PYBIND11_MODULE(qvcache, m) {
                     p, deviation_factor, memory_index_max_points, beamwidth,
                     use_regional_theta, pca_dim, buckets_per_dim, max_regions,
                     n_async_insert_threads, lazy_theta_updates,
-                    number_of_mini_indexes, search_mini_indexes_in_parallel,
+                    number_of_mini_indexes,
                     max_search_threads, metric, nullptr
                 );
             } else {
@@ -95,7 +93,7 @@ PYBIND11_MODULE(qvcache, m) {
                     p, deviation_factor, memory_index_max_points, beamwidth,
                     use_regional_theta, pca_dim, buckets_per_dim, max_regions,
                     n_async_insert_threads, lazy_theta_updates,
-                    number_of_mini_indexes, search_mini_indexes_in_parallel,
+                    number_of_mini_indexes,
                     max_search_threads, metric, std::move(backend)
                 );
             }
@@ -121,7 +119,6 @@ PYBIND11_MODULE(qvcache, m) {
             py::arg("n_async_insert_threads") = 4,
             py::arg("lazy_theta_updates") = true,
             py::arg("number_of_mini_indexes") = 2,
-            py::arg("search_mini_indexes_in_parallel") = false,
             py::arg("max_search_threads") = 32,
             py::arg("metric") = diskann::Metric::L2,
             py::arg("backend") = py::none(),
@@ -160,9 +157,6 @@ PYBIND11_MODULE(qvcache, m) {
         }, "Search for K nearest neighbors")
         .def("set_search_strategy", &QVCache<float>::set_search_strategy)
         .def("get_search_strategy", &QVCache<float>::get_search_strategy)
-        .def("enable_adaptive_strategy", &QVCache<float>::enable_adaptive_strategy)
-        .def("set_hit_ratio_window_size", &QVCache<float>::set_hit_ratio_window_size)
-        .def("set_hit_ratio_threshold", &QVCache<float>::set_hit_ratio_threshold)
         .def("get_number_of_vectors_in_memory_index", &QVCache<float>::get_number_of_vectors_in_memory_index)
         .def("get_number_of_max_points_in_memory_index", &QVCache<float>::get_number_of_max_points_in_memory_index)
         .def("get_number_of_mini_indexes", &QVCache<float>::get_number_of_mini_indexes)
@@ -180,7 +174,7 @@ PYBIND11_MODULE(qvcache, m) {
            bool use_regional_theta, size_t pca_dim, size_t buckets_per_dim,
            size_t max_regions,
            uint32_t n_async_insert_threads, bool lazy_theta_updates,
-           size_t number_of_mini_indexes, bool search_mini_indexes_in_parallel,
+           size_t number_of_mini_indexes,
            size_t max_search_threads, diskann::Metric metric,
            py::object python_backend) {
             
@@ -193,7 +187,7 @@ PYBIND11_MODULE(qvcache, m) {
                 p, deviation_factor, memory_index_max_points, beamwidth,
                 use_regional_theta, pca_dim, buckets_per_dim, max_regions,
                 n_async_insert_threads, lazy_theta_updates,
-                number_of_mini_indexes, search_mini_indexes_in_parallel,
+                number_of_mini_indexes,
                 max_search_threads, metric, std::move(backend)
             );
         },

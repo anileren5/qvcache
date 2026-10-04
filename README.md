@@ -321,13 +321,12 @@ qvcache = qvc.QVCache(
     n_async_insert_threads=16,
     lazy_theta_updates=True,
     number_of_mini_indexes=4,
-    search_mini_indexes_in_parallel=False,
     max_search_threads=32,
     backend=backend  # Pass your backend here
 )
 
-# Set search strategy (optional)
-qvcache.set_search_strategy(qvc.SearchStrategy.SEQUENTIAL_LRU_ADAPTIVE)
+# Set search strategy (SEQUENTIAL or PARALLEL)
+qvcache.set_search_strategy(qvc.SearchStrategy.SEQUENTIAL)
 ```
 
 ---

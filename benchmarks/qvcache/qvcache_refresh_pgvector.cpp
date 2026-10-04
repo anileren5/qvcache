@@ -65,15 +65,16 @@ int run_refresh_bench(
         false, p, deviation_factor, memory_index_max_points, beamwidth,
         use_regional_theta, pca_dim, buckets_per_dim, max_regions,
         n_async_insert_threads, lazy_theta_updates, number_of_mini_indexes,
-        false, 32, metric, std::move(backend), false, query_path);
+        32, metric, std::move(backend), false, query_path);
 
-    if (search_strategy == "SEQUENTIAL_ALL") {
-        cache.set_search_strategy(qvcache::QVCache<T>::SearchStrategy::SEQUENTIAL_ALL);
-    } else if (search_strategy == "SEQUENTIAL_LRU_ADAPTIVE") {
-        cache.set_search_strategy(qvcache::QVCache<T>::SearchStrategy::SEQUENTIAL_LRU_ADAPTIVE);
-        cache.enable_adaptive_strategy(true);
+    if (search_strategy == "PARALLEL") {
+        cache.set_search_strategy(qvcache::QVCache<T>::SearchStrategy::PARALLEL);
+    } else if (search_strategy == "SEQUENTIAL") {
+        cache.set_search_strategy(qvcache::QVCache<T>::SearchStrategy::SEQUENTIAL);
     } else {
-        cache.set_search_strategy(qvcache::QVCache<T>::SearchStrategy::SEQUENTIAL_LRU_STOP_FIRST_HIT);
+        std::cerr << "Unknown search strategy: " << search_strategy
+                  << " (expected SEQUENTIAL or PARALLEL)" << std::endl;
+        exit(1);
     }
     cache.set_write_theta_discount(write_theta_discount);
     cache.set_write_l1_radius(write_l1_radius);
@@ -256,7 +257,7 @@ int main(int argc, char** argv) {
     size_t memory_index_max_points = 200000, max_regions = 1000000, number_of_mini_indexes = 4;
     bool use_regional_theta = true, lazy_theta_updates = true;
     uint32_t pca_dim = 16, buckets_per_dim = 8, n_async_insert_threads = 4;
-    std::string search_strategy = "SEQUENTIAL_LRU_STOP_FIRST_HIT";
+    std::string search_strategy = "SEQUENTIAL";
     std::string metric_str = "l2";
     double insert_frac = 0.05, delete_rate = 0.05;
     size_t n_warmup = 0, n_eval = 0;
