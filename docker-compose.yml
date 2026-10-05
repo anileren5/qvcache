@@ -7,7 +7,8 @@ services:
       # Aker: the Aker tree is included via this bind mount at /app/external/Aker
       - .:/app
     working_dir: /app
-    entrypoint: bash
+    entrypoint: ["/app/scripts/docker/entrypoint.sh"]
+    command: ["sleep", "infinity"]
     stdin_open: true
     tty: true
     depends_on:

@@ -828,42 +828,49 @@ namespace qvcache {
             bool parallel_search_memory_indices(const T* query_ptr, uint32_t K, 
                                               uint32_t* query_result_tags_ptr, std::vector<T*>& res,
                                               float* query_result_dists_ptr) {
-                if (number_of_mini_indexes == 1) {
-                    // Single index case - no need for parallelization
-                    return search_single_index(0, query_ptr, K, query_result_tags_ptr, res, query_result_dists_ptr);
+                std::vector<size_t> occupied;
+                occupied.reserve(number_of_mini_indexes);
+                for (size_t index_id = 0; index_id < number_of_mini_indexes; ++index_id) {
+                    if (memory_indices[index_id]->get_number_of_active_vectors() > 0) {
+                        occupied.push_back(index_id);
+                    }
+                }
+                if (occupied.empty()) {
+                    return false;
+                }
+                // Pool wake/join is ~0.3ms. One live shard must stay on the sequential hit path.
+                if (occupied.size() == 1) {
+                    return search_single_index(occupied[0], query_ptr, K, query_result_tags_ptr, res, query_result_dists_ptr);
                 }
 
-                // Prepare results for each index. Each index id is claimed by one worker.
+                // Prepare results for each index. Each occupied shard is claimed by one worker.
                 std::vector<std::vector<uint32_t>> all_tags(number_of_mini_indexes);
                 std::vector<std::vector<float>> all_dists(number_of_mini_indexes);
                 std::vector<std::vector<T*>> all_res(number_of_mini_indexes);
 
-                auto search_worker = [&](size_t index_id) {
-                    if (index_id >= memory_indices.size()) {
+                auto search_worker = [&](size_t job_id) {
+                    if (job_id >= occupied.size()) {
                         return;
                     }
+                    const size_t index_id = occupied[job_id];
+                    std::vector<uint32_t> temp_tags(K);
+                    std::vector<float> temp_dists(K);
+                    std::vector<T*> temp_res;
 
-                    if (memory_indices[index_id]->get_number_of_active_vectors() > 0) {
-                        std::vector<uint32_t> temp_tags(K);
-                        std::vector<float> temp_dists(K);
-                        // Don't pre-size temp_res - DiskANN's get_vector expects valid pointers if res_vectors is non-empty.
-                        std::vector<T*> temp_res;
+                    size_t num_results = memory_indices[index_id]->search_with_tags(query_ptr, K, memory_L, temp_tags.data(), temp_dists.data(), temp_res);
 
-                        size_t num_results = memory_indices[index_id]->search_with_tags(query_ptr, K, memory_L, temp_tags.data(), temp_dists.data(), temp_res);
-
-                        temp_tags.resize(num_results);
-                        temp_dists.resize(num_results);
-                        all_tags[index_id] = std::move(temp_tags);
-                        all_dists[index_id] = std::move(temp_dists);
-                        all_res[index_id] = std::move(temp_res);
-                    }
+                    temp_tags.resize(num_results);
+                    temp_dists.resize(num_results);
+                    all_tags[index_id] = std::move(temp_tags);
+                    all_dists[index_id] = std::move(temp_dists);
+                    all_res[index_id] = std::move(temp_res);
                 };
 
                 if (search_pool) {
-                    search_pool->parallel_for(number_of_mini_indexes, search_worker);
+                    search_pool->parallel_for(occupied.size(), search_worker);
                 } else {
-                    for (size_t index_id = 0; index_id < number_of_mini_indexes; ++index_id) {
-                        search_worker(index_id);
+                    for (size_t job_id = 0; job_id < occupied.size(); ++job_id) {
+                        search_worker(job_id);
                     }
                 }
 

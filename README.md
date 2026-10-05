@@ -15,8 +15,10 @@ We provide a Docker-based environment that allows rapid deployment and experimen
 * A `pgvector` backend container
 
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
+
+The first start installs remaining packages if needed and runs `./build.sh` (Aker + QVCache, including pgvector binaries). Later starts skip that if `build/benchmarks/` already has the targets.
 
 ---
 
@@ -30,9 +32,7 @@ docker exec -it qvcache /bin/bash
 
 ---
 
-## 3. Build the Project
-
-Inside the container, build all required components:
+## 3. Rebuild after code changes
 
 ```bash
 ./build.sh
