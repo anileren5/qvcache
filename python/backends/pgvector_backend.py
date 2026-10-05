@@ -27,7 +27,10 @@ class PgVectorBackend:
                  db_password: str = "postgres",
                  data_path: str = None,
                  recreate_table: bool = False,
-                 metric: str = "l2"):
+                 metric: str = "l2",
+                 hnsw_m: int = 16,
+                 hnsw_ef_construction: int = 64,
+                 rebuild_hnsw: bool = False):
         """
         Initialize the pgvector backend.
         
@@ -42,10 +45,15 @@ class PgVectorBackend:
             data_path: Optional path to binary data file to load vectors from (DiskANN format)
             recreate_table: If True, recreate the table even if it exists
             metric: Distance metric to use - "l2" or "cosine" (default: "l2")
+            hnsw_m: HNSW max connections per node (default: 16)
+            hnsw_ef_construction: HNSW construction candidate list size (default: 64)
+            rebuild_hnsw: If True, drop existing HNSW indexes and rebuild
         """
         # Store connection parameters
         self.table_name = table_name
         self.dim = int(dimension)  # Ensure dimension is a Python int
+        self.hnsw_m = int(hnsw_m)
+        self.hnsw_ef_construction = int(hnsw_ef_construction)
         self.db_host = db_host
         self.db_port = db_port
         self.db_name = db_name
@@ -136,29 +144,8 @@ class PgVectorBackend:
             if num_entities == 0 and data_path and os.path.exists(data_path):
                 print(f"Table exists but is empty. Loading data...")
                 self._load_data_from_file(data_path)
-                
-                # Check if index exists, if not create it
-                with self.conn.cursor() as cur:
-                    cur.execute("""
-                        SELECT COUNT(*) 
-                        FROM pg_indexes 
-                        WHERE tablename = %s AND indexname LIKE '%vector%'
-                    """, (table_name,))
-                    index_exists = cur.fetchone()[0] > 0
-                
-                if not index_exists:
-                    print(f"Creating IVFFlat index...")
-                    with self.conn.cursor() as cur:
-                        cur.execute(f"SELECT COUNT(*) FROM {table_name}")
-                        num_vectors = cur.fetchone()[0]
-                        num_lists = max(100, min(1000, num_vectors // 1000))
-                        ops = "vector_cosine_ops" if self.metric == "cosine" else "vector_l2_ops"
-                        cur.execute(f"""
-                            CREATE INDEX ON {self.table_name} 
-                            USING ivfflat (vector {ops})
-                            WITH (lists = {num_lists})
-                        """)
-                    print(f"Created IVFFlat index with {num_lists} lists using {ops}")
+            elif rebuild_hnsw:
+                self.rebuild_hnsw_index()
         
         print(f"PgVectorBackend initialized with table '{table_name}' (metric: {self.metric})")
     
@@ -220,22 +207,47 @@ class PgVectorBackend:
                 remaining -= n
                 print(f"Loaded {loaded}/{num_vectors} vectors...", end='\r')
             
-            # Create HNSW index after data is loaded for optimal recall
-            # HNSW generally provides better recall than IVFFlat
-            ops = "vector_cosine_ops" if self.metric == "cosine" else "vector_l2_ops"
-            print(f"Creating HNSW index (better recall than IVFFlat) using {ops}...")
-            with self.conn.cursor() as cur:
-                # Aker paper HNSW: m=16, ef_construction=64
-                cur.execute("SET maintenance_work_mem = '8GB'")
-                cur.execute("SET max_parallel_maintenance_workers = 8")
-                cur.execute(f"""
-                    CREATE INDEX ON {self.table_name} 
-                    USING hnsw (vector {ops})
-                    WITH (m = 16, ef_construction = 64)
-                """)
-            print(f"Created HNSW index with m=16, ef_construction=64 using {ops}")
-            
+            self._create_hnsw_index()
             print(f"\nLoaded {num_vectors} vectors into PostgreSQL")
+
+    def _vector_ops(self) -> str:
+        return "vector_cosine_ops" if self.metric == "cosine" else "vector_l2_ops"
+
+    def _create_hnsw_index(self) -> None:
+        ops = self._vector_ops()
+        print(
+            f"Creating HNSW index using {ops} "
+            f"(m={self.hnsw_m}, ef_construction={self.hnsw_ef_construction})..."
+        )
+        with self.conn.cursor() as cur:
+            cur.execute("SET maintenance_work_mem = '8GB'")
+            cur.execute("SET max_parallel_maintenance_workers = 8")
+            cur.execute(f"""
+                CREATE INDEX ON {self.table_name}
+                USING hnsw (vector {ops})
+                WITH (m = {self.hnsw_m}, ef_construction = {self.hnsw_ef_construction})
+            """)
+        print(
+            f"Created HNSW index with m={self.hnsw_m}, "
+            f"ef_construction={self.hnsw_ef_construction} using {ops}"
+        )
+
+    def rebuild_hnsw_index(self) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT indexname
+                FROM pg_indexes
+                WHERE tablename = %s
+                  AND indexdef ILIKE '%%USING hnsw%%'
+                """,
+                (self.table_name,),
+            )
+            names = [row[0] for row in cur.fetchall()]
+            for name in names:
+                print(f"Dropping HNSW index {name} on {self.table_name}")
+                cur.execute(f'DROP INDEX IF EXISTS "{name}"')
+        self._create_hnsw_index()
     
     def search(self, query: np.ndarray, K: int) -> Tuple[np.ndarray, np.ndarray]:
         """

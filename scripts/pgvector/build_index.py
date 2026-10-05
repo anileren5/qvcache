@@ -33,6 +33,12 @@ def main():
                        help="Distance metric (default: l2)")
     parser.add_argument("--recreate", action="store_true",
                        help="Recreate table even if it exists")
+    parser.add_argument("--rebuild-hnsw", action="store_true",
+                       help="Drop and rebuild HNSW on the existing table (no data reload)")
+    parser.add_argument("--hnsw-m", type=int, default=16,
+                       help="HNSW m (default: 16)")
+    parser.add_argument("--ef-construction", type=int, default=64,
+                       help="HNSW ef_construction (default: 64)")
     parser.add_argument("--dimension", type=int, default=None,
                        help="Vector dimension (will be read from file if not provided)")
     
@@ -59,7 +65,10 @@ def main():
         db_password=args.db_password,
         data_path=args.data_path,
         recreate_table=args.recreate,
-        metric=args.metric
+        metric=args.metric,
+        hnsw_m=args.hnsw_m,
+        hnsw_ef_construction=args.ef_construction,
+        rebuild_hnsw=args.rebuild_hnsw
     )
     
     # Verify the table
@@ -70,6 +79,7 @@ def main():
     print(f"Table '{args.table_name}' contains {num_entities} vectors")
     print(f"Vector dimension: {dimension}")
     print(f"Distance metric: {args.metric}")
+    print(f"HNSW: m={args.hnsw_m} ef_construction={args.ef_construction}")
 
 
 if __name__ == "__main__":
