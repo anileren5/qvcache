@@ -61,7 +61,8 @@ cmake_install.cmake
 .DS_Store
 Thumbs.db
 
-# Log files
+# Log files (keep on disk, do not push)
+logs/
 *.log
 
 # Visualization
