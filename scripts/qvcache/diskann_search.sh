@@ -6,18 +6,12 @@ set -e
 cd "$(dirname "$0")/../.." || exit 1
 
 # Aker: SPACEV-1M for now. Override DATASET=spacev-10m for paper-scale.
-DATASET="${DATASET:-spacev-small-test}"
+DATASET="${DATASET:-spacev-1m}"
 DATA_TYPE="${DATA_TYPE:-int8}"
 # Aker: official simZipf stream (default). Use QUERY_STREAM=query for the unique example-queryset.
 QUERY_STREAM="${QUERY_STREAM:-sim-100k-0.3}"
-DATA_PATH="data/$DATASET/${DATASET}_base.bin"
-if [ "$QUERY_STREAM" = "query" ]; then
-  QUERY_PATH="data/$DATASET/${DATASET}_query.bin"
-  GROUNDTRUTH_PATH="data/$DATASET/${DATASET}_groundtruth.bin"
-else
-  QUERY_PATH="data/$DATASET/${DATASET}_query_${QUERY_STREAM}.bin"
-  GROUNDTRUTH_PATH="data/$DATASET/${DATASET}_groundtruth_${QUERY_STREAM}.bin"
-fi
+# shellcheck source=../workload/dataset_paths.sh
+source "$(dirname "$0")/../workload/dataset_paths.sh"
 
 # Aker search-workload: sequential file order. Dummy window args are unused when
 # REPORT_INTERVAL > 0; metrics are logged every N queries.

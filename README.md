@@ -47,9 +47,13 @@ Datasets must be placed under the `data/` directory using the following structur
 ```text
 data/
   dataset_name/
-    dataset_base.bin
-    dataset_query.bin
-    dataset_groundtruth.bin
+    base.bin
+    query.bin
+    groundtruth.bin
+    queries/
+      stream_name/
+        query.bin
+        groundtruth.bin
 ```
 
 All benchmark scripts operate on `.bin` formatted datasets.
@@ -208,11 +212,11 @@ import qvcache as qvc
 from backends.custom_backend import CustomBackend
 
 # Initialize your backend
-backend = CustomBackend(data_path="data/dataset/dataset_base.bin", metric="l2")
+backend = CustomBackend(data_path="data/dataset/base.bin", metric="l2")
 
 # Create QVCache with your backend
 qvcache = qvc.QVCache(
-    data_path="data/dataset/dataset_base.bin",  # Base data file used to construct the PCA transformation matrix
+    data_path="data/dataset/base.bin",  # Base data file used to construct the PCA transformation matrix
     pca_prefix="pca_index",
     R=64,
     memory_L=128,

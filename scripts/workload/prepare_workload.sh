@@ -7,14 +7,14 @@
 #   ./scripts/workload/prepare_workload.sh simzipf+
 #   ./scripts/workload/prepare_workload.sh simzipf+2
 #
-# Optional: SKEW=0.99 DISTRIBUTION=zipfian DATASET=spacev-small-test SKIP_GT=1
+# Optional: SKEW=0.99 DISTRIBUTION=zipfian DATASET=spacev-1m SKIP_GT=1
 # SPACEV-10M official simZipf: DATASET=spacev-10m ./scripts/workload/prepare_workload.sh simzipf
 set -euo pipefail
 
 cd "$(dirname "$0")/../.." || exit 1
 
 WORKLOAD="${1:-${WORKLOAD:-}}"
-DATASET="${DATASET:-spacev-small-test}"
+DATASET="${DATASET:-spacev-1m}"
 DATA_TYPE="${DATA_TYPE:-int8}"
 SKEW="${SKEW:-0.99}"
 DISTRIBUTION="${DISTRIBUTION:-zipfian}"
@@ -68,12 +68,21 @@ stream_size_tag() {
 }
 STREAM_SIZE="$(stream_size_tag "${N_STREAM}")"
 
-AKER_DATASET_DIR="${AKER_DATASET_DIR:-external/Aker/pgvector-bench/dataset/${DATASET}}"
-BASE_BIN="${OUT_DIR}/${DATASET}_base.bin"
-QUERYSET_BIN="${OUT_DIR}/${DATASET}_query.bin"
-QUERYSET_GT="${OUT_DIR}/${DATASET}_groundtruth.bin"
+if [[ "${DATASET}" == "spacev-1m" ]]; then
+  AKER_DATASET_DIR="${AKER_DATASET_DIR:-external/Aker/pgvector-bench/dataset/spacev-small-test}"
+else
+  AKER_DATASET_DIR="${AKER_DATASET_DIR:-external/Aker/pgvector-bench/dataset/${DATASET}}"
+fi
+BASE_BIN="${OUT_DIR}/base.bin"
+QUERYSET_BIN="${OUT_DIR}/query.bin"
+QUERYSET_GT="${OUT_DIR}/groundtruth.bin"
 INDEX_PREFIX="./index/${DATASET}/${DATASET}"
 COMPUTE_GT_BIN="./build/benchmarks/compute_groundtruth"
+
+stream_dir() { echo "${OUT_DIR}/queries/${1}"; }
+stream_query() { echo "${OUT_DIR}/queries/${1}/query.bin"; }
+stream_gt() { echo "${OUT_DIR}/queries/${1}/groundtruth.bin"; }
+stream_stats() { echo "${OUT_DIR}/queries/${1}/stats.json"; }
 
 mkdir -p "${AKER_DATASET_DIR}" "${OUT_DIR}" "./index/${DATASET}"
 
@@ -172,8 +181,9 @@ prepare_simzipf_10m() {
   download_hf "spacev-10m.npy" "${AKER_DATASET_DIR}/spacev-10m.npy"
   download_hf "spacev-sim-100k-${SKEW_TAG}.npy" "${AKER_DATASET_DIR}/spacev-sim-100k-${SKEW_TAG}.npy"
   npy_to_bin "${AKER_DATASET_DIR}/spacev-10m.npy" "${BASE_BIN}"
-  npy_to_bin "${AKER_DATASET_DIR}/spacev-sim-100k-${SKEW_TAG}.npy" "${OUT_DIR}/${DATASET}_query_${stream_tag}.bin"
-  maybe_gt "${OUT_DIR}/${DATASET}_query_${stream_tag}.bin" "${OUT_DIR}/${DATASET}_groundtruth_${stream_tag}.bin"
+  mkdir -p "$(stream_dir "${stream_tag}")"
+  npy_to_bin "${AKER_DATASET_DIR}/spacev-sim-100k-${SKEW_TAG}.npy" "$(stream_query "${stream_tag}")"
+  maybe_gt "$(stream_query "${stream_tag}")" "$(stream_gt "${stream_tag}")"
   echo ""
   echo "Ready ${stream_tag}:"
   echo "  QUERY_STREAM=${stream_tag} ./scripts/aker/diskann_search.sh"
@@ -193,8 +203,9 @@ prepare_simzipf_official() {
     exit 1
   fi
   download_hf "${npy_name}" "${AKER_DATASET_DIR}/${npy_name}"
-  npy_to_bin "${AKER_DATASET_DIR}/${npy_name}" "${OUT_DIR}/${DATASET}_query_${stream_tag}.bin"
-  maybe_gt "${OUT_DIR}/${DATASET}_query_${stream_tag}.bin" "${OUT_DIR}/${DATASET}_groundtruth_${stream_tag}.bin"
+  mkdir -p "$(stream_dir "${stream_tag}")"
+  npy_to_bin "${AKER_DATASET_DIR}/${npy_name}" "$(stream_query "${stream_tag}")"
+  maybe_gt "$(stream_query "${stream_tag}")" "$(stream_gt "${stream_tag}")"
   echo ""
   echo "Ready ${stream_tag}:"
   echo "  QUERY_STREAM=${stream_tag} ./scripts/aker/diskann_search.sh"
@@ -222,9 +233,10 @@ prepare_generated() {
         stream_tag="sim-${STREAM_SIZE}-${SKEW_TAG}-gen"
       fi
       SKIP_GT="${SKIP_GT:-1}"
+      mkdir -p "$(stream_dir "${stream_tag}")"
       python3 scripts/workload/generate_simzipf.py \
         --queryset "${QUERYSET_BIN}" \
-        --output "${OUT_DIR}/${DATASET}_query_${stream_tag}.bin" \
+        --output "$(stream_query "${stream_tag}")" \
         --dtype "${DATA_TYPE}" \
         --distribution "${DISTRIBUTION}" \
         --skew "${SKEW}" \
@@ -232,46 +244,52 @@ prepare_generated() {
         --group-size "${GROUP_SIZE}" \
         --lambda-max "${LAMBDA_MAX}" \
         --seed "${SEED}" \
-        --stats-json "${OUT_DIR}/${DATASET}_${stream_tag}.stats.json"
+        --stats-json "$(stream_stats "${stream_tag}")"
       ;;
     simzipf+)
+      # Fixed interpolation weight ε (default 0.01).
+      local lam_tag="lam${EPSILON}"
       if [[ "${DISTRIBUTION}" == "uniform" ]]; then
-        stream_tag="simplus-${STREAM_SIZE}-uniform"
+        stream_tag="simplus-${STREAM_SIZE}-uniform-${lam_tag}"
       else
-        stream_tag="simplus-${STREAM_SIZE}-${SKEW_TAG}"
+        stream_tag="simplus-${STREAM_SIZE}-${SKEW_TAG}-${lam_tag}"
       fi
       SKIP_GT="${SKIP_GT:-1}"
+      mkdir -p "$(stream_dir "${stream_tag}")"
       python3 scripts/workload/generate_simzipf_plus.py \
         --queryset "${QUERYSET_BIN}" \
-        --output "${OUT_DIR}/${DATASET}_query_${stream_tag}.bin" \
+        --output "$(stream_query "${stream_tag}")" \
         --dtype "${DATA_TYPE}" \
         --distribution "${DISTRIBUTION}" \
         --skew "${SKEW}" \
         --epsilon "${EPSILON}" \
         --n-stream "${N_STREAM}" \
         --seed "${SEED}" \
-        --stats-json "${OUT_DIR}/${DATASET}_${stream_tag}.stats.json"
+        --stats-json "$(stream_stats "${stream_tag}")"
       ;;
     simzipf+2)
+      # Per-access ε ~ Unif(0, lambda_max) (default 0.5). Keep the simplus prefix.
+      local lam_tag="lamU0-${LAMBDA_MAX}"
       if [[ "${DISTRIBUTION}" == "uniform" ]]; then
-        stream_tag="simplus2-${STREAM_SIZE}-uniform"
+        stream_tag="simplus-${STREAM_SIZE}-uniform-${lam_tag}"
       else
-        stream_tag="simplus2-${STREAM_SIZE}-${SKEW_TAG}"
+        stream_tag="simplus-${STREAM_SIZE}-${SKEW_TAG}-${lam_tag}"
       fi
       SKIP_GT="${SKIP_GT:-0}"
+      mkdir -p "$(stream_dir "${stream_tag}")"
       python3 scripts/workload/generate_simzipf_plus.py \
         --queryset "${QUERYSET_BIN}" \
-        --output "${OUT_DIR}/${DATASET}_query_${stream_tag}.bin" \
+        --output "$(stream_query "${stream_tag}")" \
         --dtype "${DATA_TYPE}" \
         --distribution "${DISTRIBUTION}" \
         --skew "${SKEW}" \
         --lambda-max "${LAMBDA_MAX}" \
         --n-stream "${N_STREAM}" \
         --seed "${SEED}" \
-        --stats-json "${OUT_DIR}/${DATASET}_${stream_tag}.stats.json"
+        --stats-json "$(stream_stats "${stream_tag}")"
       ;;
   esac
-  maybe_gt "${OUT_DIR}/${DATASET}_query_${stream_tag}.bin" "${OUT_DIR}/${DATASET}_groundtruth_${stream_tag}.bin"
+  maybe_gt "$(stream_query "${stream_tag}")" "$(stream_gt "${stream_tag}")"
   echo ""
   echo "Ready ${stream_tag}:"
   echo "  QUERY_STREAM=${stream_tag} ./scripts/aker/diskann_search.sh"

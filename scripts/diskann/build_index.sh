@@ -19,7 +19,7 @@ single_file_index=0
 sector_len=4096
 
 # Input and output paths
-base_file="./data/${dataset}/${dataset}_base.bin"
+base_file="./data/${dataset}/base.bin"
 index_dir="./index/${dataset}"
 index_prefix="${index_dir}/${dataset}"
 

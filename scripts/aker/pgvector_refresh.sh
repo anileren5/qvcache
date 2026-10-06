@@ -10,15 +10,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.." || exit 1
 
-DATASET="${DATASET:-spacev-small-test}"
+DATASET="${DATASET:-spacev-1m}"
 DATA_TYPE="${DATA_TYPE:-int8}"
 QUERY_STREAM="${QUERY_STREAM:-sim-100k-0.99}"
-DATA_PATH="data/$DATASET/${DATASET}_base.bin"
-if [ "$QUERY_STREAM" = "query" ]; then
-  QUERY_PATH="data/$DATASET/${DATASET}_query.bin"
-else
-  QUERY_PATH="data/$DATASET/${DATASET}_query_${QUERY_STREAM}.bin"
-fi
+# shellcheck source=../workload/dataset_paths.sh
+source "$(dirname "$0")/../workload/dataset_paths.sh"
 if [ ! -f "$QUERY_PATH" ]; then
   echo "Error: missing query file $QUERY_PATH"
   echo "Prepare: ./scripts/workload/prepare_workload.sh simzipf   # or simzipf+ / simzipf+2"
@@ -46,8 +42,8 @@ GT_THREADS="${GT_THREADS:-8}"
 SEED="${SEED:-1}"
 AKER_PROCESS_LOG="${AKER_PROCESS_LOG:-1}"
 REBUILD_INDEX="${REBUILD_INDEX:-1}"
-LIVE_GT_PATH="${LIVE_GT_PATH:-data/$DATASET/${DATASET}_groundtruth_${QUERY_STREAM}.refresh_ins${INSERT_FRAC}_del${DELETE_RATE}_k${K}_seed${SEED}.bin}"
-WARMUP_GT_PATH="${WARMUP_GT_PATH:-data/$DATASET/${DATASET}_groundtruth_${QUERY_STREAM}.bin}"
+LIVE_GT_PATH="${LIVE_GT_PATH:-$STREAM_DIR/groundtruth.refresh_ins${INSERT_FRAC}_del${DELETE_RATE}_k${K}_seed${SEED}.bin}"
+WARMUP_GT_PATH="${WARMUP_GT_PATH:-$GROUNDTRUTH_PATH}"
 if [ ! -f "$WARMUP_GT_PATH" ]; then
   echo "Error: missing search-only groundtruth $WARMUP_GT_PATH"
   echo "Warmup recall loads this file; it is never computed or overwritten."

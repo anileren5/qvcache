@@ -10,7 +10,7 @@ cd "$(dirname "$0")/../.." || exit 1
 # ============================================================================
 # SPACEV-10M DiskANN bin (int8). Table name cannot contain '-'.
 DATASET="${DATASET:-spacev-10m}"
-DATA_PATH="${DATA_PATH:-data/$DATASET/${DATASET}_base.bin}"
+DATA_PATH="${DATA_PATH:-data/$DATASET/base.bin}"
 
 # ============================================================================
 # POSTGRESQL CONFIGURATION
