@@ -4,8 +4,7 @@ services:
     image: qvcache:latest
     build: .
     volumes:
-      # Aker: the Aker tree is included via this bind mount at /app/external/Aker
-      - .:/app
+      - /local/home/agoecer/qvcache:/app
     working_dir: /app
     entrypoint: ["/app/scripts/docker/entrypoint.sh"]
     command: ["sleep", "infinity"]

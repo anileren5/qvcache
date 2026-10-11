@@ -2,8 +2,10 @@
 // Licensed under the MIT license.
 
 #include <memory>
+#include <type_traits>
 #include "abstract_scratch.h"
 #include "in_mem_data_store.h"
+#include "l2_float_simd.h"
 
 #include "utils.h"
 
@@ -229,9 +231,45 @@ void InMemDataStore<data_t>::get_distance(const data_t *query, const location_t 
                                           const uint32_t location_count, float *distances,
                                           AbstractScratch<data_t> *scratch_space) const
 {
-    // Graph neighbors are scattered. Pull the next few vectors into cache
-    // while the current distance runs. Depth 8 stays within the CPU's fill buffers.
     const size_t vec_bytes = sizeof(data_t) * _aligned_dim;
+    // A 768-d float is 3KB. Prefetch the whole next vector into L2, two slots
+    // ahead. T1 does not fill L1, so the query stays there while this distance
+    // reads the neighbor from L2.
+    if (vec_bytes > 256)
+    {
+        constexpr uint32_t k_prefetch_ahead = 2;
+        auto prefetch_at = [&](uint32_t j) {
+            if (j < location_count)
+            {
+                diskann::prefetch_vector_l2(
+                    reinterpret_cast<const char *>(_data + (size_t)locations[j] * _aligned_dim), vec_bytes);
+            }
+        };
+        for (uint32_t j = 0; j < k_prefetch_ahead; ++j)
+        {
+            prefetch_at(j);
+        }
+        if constexpr (std::is_same<data_t, float>::value)
+        {
+            const uint32_t dim = (uint32_t)_aligned_dim;
+            for (uint32_t i = 0; i < location_count; i++)
+            {
+                prefetch_at(i + k_prefetch_ahead);
+                distances[i] = l2sqr_f32(query, _data + (size_t)locations[i] * _aligned_dim, dim);
+            }
+            return;
+        }
+        for (uint32_t i = 0; i < location_count; i++)
+        {
+            prefetch_at(i + k_prefetch_ahead);
+            distances[i] =
+                _distance_fn->compare(query, _data + locations[i] * _aligned_dim, (uint32_t)this->_aligned_dim);
+        }
+        return;
+    }
+
+    // Short vectors (int8 SPACEV is two cache lines). The whole slot fits in
+    // L1 next to the query, so prefetch it completely.
     constexpr uint32_t k_prefetch_ahead = 8;
     auto prefetch_at = [&](uint32_t j) {
         if (j < location_count)
@@ -263,8 +301,41 @@ void InMemDataStore<data_t>::get_distance(const data_t *preprocessed_query, cons
                                           std::vector<float> &distances, AbstractScratch<data_t> *scratch_space) const
 {
     const size_t vec_bytes = sizeof(data_t) * _aligned_dim;
-    constexpr int k_prefetch_ahead = 8;
     const int n = static_cast<int>(ids.size());
+    if (vec_bytes > 256)
+    {
+        constexpr int k_prefetch_ahead = 2;
+        auto prefetch_at = [&](int j) {
+            if (j < n)
+            {
+                diskann::prefetch_vector_l2(
+                    reinterpret_cast<const char *>(_data + (size_t)ids[j] * _aligned_dim), vec_bytes);
+            }
+        };
+        for (int j = 0; j < k_prefetch_ahead; ++j)
+        {
+            prefetch_at(j);
+        }
+        if constexpr (std::is_same<data_t, float>::value)
+        {
+            const uint32_t dim = (uint32_t)_aligned_dim;
+            for (int i = 0; i < n; i++)
+            {
+                prefetch_at(i + k_prefetch_ahead);
+                distances[i] = l2sqr_f32(preprocessed_query, _data + (size_t)ids[i] * _aligned_dim, dim);
+            }
+            return;
+        }
+        for (int i = 0; i < n; i++)
+        {
+            prefetch_at(i + k_prefetch_ahead);
+            distances[i] = _distance_fn->compare(preprocessed_query, _data + ids[i] * _aligned_dim,
+                                                 (uint32_t)this->_aligned_dim);
+        }
+        return;
+    }
+
+    constexpr int k_prefetch_ahead = 8;
     auto prefetch_at = [&](int j) {
         if (j < n)
         {

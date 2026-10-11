@@ -75,3 +75,5 @@ papers/
 
 # Third-party dependencies (cloned by build scripts)
 backends/SPTAG/ThirdParty/zstd/
+
+cluster

@@ -15,7 +15,11 @@ cd "$(dirname "$0")/../.." || exit 1
 
 WORKLOAD="${1:-${WORKLOAD:-}}"
 DATASET="${DATASET:-spacev-1m}"
-DATA_TYPE="${DATA_TYPE:-int8}"
+if [[ "${DATASET}" == "sphere-10m" ]]; then
+  DATA_TYPE="${DATA_TYPE:-float}"
+else
+  DATA_TYPE="${DATA_TYPE:-int8}"
+fi
 SKEW="${SKEW:-0.99}"
 DISTRIBUTION="${DISTRIBUTION:-zipfian}"
 N_STREAM="${N_STREAM:-100000}"
@@ -296,6 +300,67 @@ prepare_generated() {
   echo "  QUERY_STREAM=${stream_tag} ./scripts/qvcache/diskann_search.sh"
 }
 
+prepare_sphere_simzipf() {
+  local skew dest stream_tag
+  for skew in 0.3 0.6 0.99; do
+    stream_tag="sim-100k-${skew}"
+    dest="$(stream_dir "${stream_tag}")"
+    mkdir -p "${OUT_DIR}/raw" "${dest}"
+    download_hf "triviaqa-sim-100k-${skew}.npy" "${OUT_DIR}/raw/triviaqa-sim-100k-${skew}.npy"
+    download_hf "triviaqa-sim-100k-${skew}.pkl" "${OUT_DIR}/raw/triviaqa-sim-100k-${skew}.pkl"
+    if [[ -f "$(stream_query "${stream_tag}")" && -f "$(stream_gt "${stream_tag}")" ]]; then
+      echo "bins exist: ${dest}"
+      continue
+    fi
+    python3 scripts/workload/import_official_triviaqa.py \
+      --npy "${OUT_DIR}/raw/triviaqa-sim-100k-${skew}.npy" \
+      --pkl "${OUT_DIR}/raw/triviaqa-sim-100k-${skew}.pkl" \
+      --out-dir "${dest}" \
+      --skew "${skew}"
+  done
+  echo ""
+  echo "Official TriviaQA simZipf streams are under ${OUT_DIR}/queries/."
+  echo "Search needs SPHERE-10M base.bin and DATA_TYPE=float:"
+  echo "  DATA_TYPE=float DATASET=sphere-10m QUERY_STREAM=sim-100k-0.99 ./scripts/aker/diskann_search.sh"
+}
+
+prepare_sphere_simplus() {
+  local skew dest src_bin src_npy stream_tag found=0
+  for skew in 0.3 0.6 0.99; do
+    stream_tag="simplus-100k-${skew}"
+    dest="$(stream_dir "${stream_tag}")"
+    src_bin="${OUT_DIR}/raw/${stream_tag}/query.bin"
+    src_npy="${OUT_DIR}/raw/${stream_tag}/query.npy"
+    mkdir -p "${dest}"
+    if [[ -f "$(stream_query "${stream_tag}")" ]]; then
+      echo "bin exists: $(stream_query "${stream_tag}")"
+      found=1
+      continue
+    fi
+    if [[ -f "${src_bin}" ]]; then
+      cp "${src_bin}" "$(stream_query "${stream_tag}")"
+      if [[ -f "${OUT_DIR}/raw/${stream_tag}/stats.json" ]]; then
+        cp "${OUT_DIR}/raw/${stream_tag}/stats.json" "$(stream_stats "${stream_tag}")"
+      fi
+      found=1
+      continue
+    fi
+    if [[ -f "${src_npy}" ]]; then
+      python3 scripts/workload/npy_to_diskann_bin.py \
+        --input "${src_npy}" --output "$(stream_query "${stream_tag}")" --dtype float
+      found=1
+      continue
+    fi
+    echo "Missing ${stream_tag}. Build it on Clariden with scripts/workload/run_triviaqa_simzipf_plus.sbatch" >&2
+  done
+  if [[ "${found}" -eq 0 ]]; then
+    exit 1
+  fi
+  echo ""
+  echo "TriviaQA simZipf+ uses a different paraphrase each time a Zipf group is chosen."
+  echo "  DATA_TYPE=float DATASET=sphere-10m QUERY_STREAM=simplus-100k-0.99 ./scripts/aker/diskann_search.sh"
+}
+
 echo "=========================================="
 echo "Prepare workload: ${WORKLOAD}"
 echo "=========================================="
@@ -313,7 +378,9 @@ case "${WORKLOAD}" in
     echo "Ready base bins under ${OUT_DIR}"
     ;;
   simzipf)
-    if [[ "${DATASET}" == "spacev-10m" ]]; then
+    if [[ "${DATASET}" == "sphere-10m" ]]; then
+      prepare_sphere_simzipf
+    elif [[ "${DATASET}" == "spacev-10m" ]]; then
       prepare_simzipf_10m
     elif [[ "${GENERATE:-0}" == "1" ]]; then
       prepare_generated simzipf
@@ -322,9 +389,17 @@ case "${WORKLOAD}" in
     fi
     ;;
   simzipf+)
-    prepare_generated simzipf+
+    if [[ "${DATASET}" == "sphere-10m" ]]; then
+      prepare_sphere_simplus
+    else
+      prepare_generated simzipf+
+    fi
     ;;
   simzipf+2)
+    if [[ "${DATASET}" == "sphere-10m" ]]; then
+      echo "TriviaQA simZipf+ has no interpolation weight. Use: DATASET=sphere-10m $0 simzipf+" >&2
+      exit 1
+    fi
     prepare_generated simzipf+2
     ;;
   *)

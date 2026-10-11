@@ -838,7 +838,19 @@ namespace qvcache {
                 if (occupied.empty()) {
                     return false;
                 }
-                // Pool wake/join is ~0.3ms. One live shard must stay on the sequential hit path.
+                // One live shard stays on the calling thread. With two or more,
+                // the fullest shard is job 0 so the caller runs it while the
+                // pool wakes onto the others.
+                size_t fullest = 0;
+                for (size_t i = 1; i < occupied.size(); ++i) {
+                    if (memory_indices[occupied[i]]->get_number_of_active_vectors() >
+                        memory_indices[occupied[fullest]]->get_number_of_active_vectors()) {
+                        fullest = i;
+                    }
+                }
+                if (fullest != 0) {
+                    std::swap(occupied[0], occupied[fullest]);
+                }
                 if (occupied.size() == 1) {
                     return search_single_index(occupied[0], query_ptr, K, query_result_tags_ptr, res, query_result_dists_ptr);
                 }
