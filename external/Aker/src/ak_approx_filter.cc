@@ -77,9 +77,10 @@ namespace aker
             std::string getStatusText() noexcept;
 
         private:
+            // Paper default query filter: m=4, efConstruction=8, efSearch=16.
             static constexpr int k_hnsw_m = 4;
-            static constexpr int k_hnsw_ef_search = 8;
-            static constexpr int k_hnsw_ef_construction = 16;
+            static constexpr int k_hnsw_ef_search = 16;
+            static constexpr int k_hnsw_ef_construction = 8;
 
             anns_cache_config_t                    parameter_;
 

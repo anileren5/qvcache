@@ -33,7 +33,7 @@ SECTOR_LEN=4096
 METRIC="l2"
 
 AKER_CONFIG="external/Aker/bootstrap/aker-standard.ini"
-AKER_TOP_DELTA=5
+AKER_TOP_DELTA=10
 # Same result-vector budget as QVCache MEMORY_INDEX_MAX_POINTS.
 AKER_POOL_SIZE=200000
 

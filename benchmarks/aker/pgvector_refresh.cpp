@@ -259,7 +259,7 @@ int main(int argc, char** argv) {
         ("hnsw_ef_search", po::value<int>(&hnsw_ef_search)->default_value(hnsw_ef_search))
         ("K", po::value<uint32_t>(&K)->default_value(K))
         ("aker_top_delta", po::value<uint32_t>(&aker_top_delta)->default_value(aker_top_delta),
-         "Aker Δ reserve (paper AK-D10 = 10)")
+         "Aker deletion reserve Δ")
         ("aker_pool_size", po::value<size_t>(&aker_pool_size)->default_value(aker_pool_size),
          "Neighbor object pool; paper refresh uses 1% of |P|")
         ("search_threads", po::value<uint32_t>(&search_threads)->default_value(search_threads))

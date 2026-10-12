@@ -24,7 +24,7 @@ fi
 K=10
 SEARCH_THREADS=1
 AKER_CONFIG="external/Aker/bootstrap/aker-standard.ini"
-# Paper AK-D10: Δ=10. Pool matches QVCache MEMORY_INDEX_MAX_POINTS.
+# Deletion reserve Δ=10. Pool matches QVCache MEMORY_INDEX_MAX_POINTS.
 AKER_TOP_DELTA="${AKER_TOP_DELTA:-10}"
 AKER_POOL_SIZE="${AKER_POOL_SIZE:-200000}"
 METRIC="l2"

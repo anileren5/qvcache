@@ -806,7 +806,7 @@ int main(int argc, char **argv) {
     uint32_t sector_len = 4096;
     size_t memory_index_max_points = 100000;
     size_t aker_pool_size = 0;
-    uint32_t aker_top_delta = 5;
+    uint32_t aker_top_delta = 10;
     int n_splits;
     int n_split_repeat;
     std::string metric_str = "l2";
@@ -837,7 +837,7 @@ int main(int argc, char **argv) {
             ("memory_index_max_points", po::value<size_t>(&memory_index_max_points)->default_value(100000), "Used to size Aker pool if aker_pool_size is 0")
             ("aker_config", po::value<std::string>(&aker_config_path)->default_value("external/Aker/bootstrap/aker-standard.ini"), "Aker bootstrap INI/JSON path")
             ("aker_pool_size", po::value<size_t>(&aker_pool_size)->default_value(0), "Aker vector pool size (0 = auto)")
-            ("aker_top_delta", po::value<uint32_t>(&aker_top_delta)->default_value(5), "Aker top_delta extra neighbors per entry")
+            ("aker_top_delta", po::value<uint32_t>(&aker_top_delta)->default_value(10), "Aker deletion reserve Δ")
             ("n_splits", po::value<int>(&n_splits)->required(), "Number of splits for queries")
             ("n_split_repeat", po::value<int>(&n_split_repeat)->required(), "Number of repeats per split pattern")
             ("metric", po::value<std::string>(&metric_str)->default_value("l2"), "Distance metric: l2, cosine, or inner_product")
