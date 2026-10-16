@@ -233,6 +233,8 @@ private:
                 PQclear(set_res);
             };
             exec_set("SET hnsw.ef_search = " + std::to_string(hnsw_ef_search_), true);
+            // The heap is mostly TOAST pointers, so a sequential scan can look cheaper than HNSW after deletes.
+            exec_set("SET enable_seqscan = off", true);
             // pgvector >= 0.8: keep scanning past ef_search to raise recall on OOD/HNSW.
             exec_set("SET hnsw.iterative_scan = relaxed_order", false);
             exec_set("SET hnsw.max_scan_tuples = 200000", false);

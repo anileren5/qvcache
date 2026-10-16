@@ -168,13 +168,8 @@ namespace qvcache {
                     int ret = index->insert_point(vectors[i], 1 + to_be_inserted[i]);
                     if (ret == 0) ++successful_inserts;
                 }
-
-                const size_t current_active_id = active_insert_index_id.load();
-                if (index.get() == memory_indices[current_active_id].get() &&
-                    !shard_has_insert_slots(current_active_id) &&
-                    !eviction_in_progress.load()) {
-                    trigger_eviction();
-                }
+                // The next miss rotates the insert shard. Replacing an index
+                // here races with a search that still holds this shard.
 
                 for (auto v : vectors) {
                     diskann::aligned_free(v);
@@ -191,12 +186,6 @@ namespace qvcache {
                     const auto& reconstructed_vec = reconstructed_vectors[i];
                     int ret = index->insert_point(reconstructed_vec.data(), 1 + to_be_inserted[i]);
                     if (ret == 0) ++successful_inserts;
-                }
-                const size_t current_active_id = active_insert_index_id.load();
-                if (index.get() == memory_indices[current_active_id].get() &&
-                    !shard_has_insert_slots(current_active_id) &&
-                    !eviction_in_progress.load()) {
-                    trigger_eviction();
                 }
             }
 
