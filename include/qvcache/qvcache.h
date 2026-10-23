@@ -90,9 +90,11 @@ namespace qvcache {
             std::atomic<uint64_t> point_evictions{0};
             std::atomic<uint64_t> region_invalidations{0};
 
-            // Aker: cache-layer time up to (not including) backend search, for miss_penalty.
+            // Cache-layer time up to (not including) backend search, for miss_penalty.
+            // tls_search_backend_ms is the backend->search call only.
             inline static thread_local std::chrono::high_resolution_clock::time_point tls_search_t0{};
             inline static thread_local double tls_cache_lookup_ms{0.0};
+            inline static thread_local double tls_search_backend_ms{0.0};
 
             void note_cache_lookup_end() {
                 tls_cache_lookup_ms = std::chrono::duration<double, std::milli>(
@@ -571,7 +573,10 @@ namespace qvcache {
 
             void handle_backend_miss(const T* query_ptr, uint32_t K, uint32_t* tags, float* dists, void* backend_stats) {
                 note_cache_lookup_end();
+                const auto backend_t0 = std::chrono::high_resolution_clock::now();
                 this->backend->search(query_ptr, static_cast<uint64_t>(K), tags, dists, nullptr, backend_stats);
+                tls_search_backend_ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::high_resolution_clock::now() - backend_t0).count();
                 std::vector<TagT> tags_to_insert;
                 tags_to_insert.reserve(K);
                 {
@@ -1131,6 +1136,7 @@ namespace qvcache {
         public:
             // Aker: cache-layer time on the last search() of this thread (ms).
             double last_cache_lookup_ms() const { return tls_cache_lookup_ms; }
+            double last_search_backend_ms() const { return tls_search_backend_ms; }
 
             template <typename... Args>
             QVCache(const std::string& data_path,
@@ -1304,6 +1310,7 @@ namespace qvcache {
             bool search(const T* query_ptr, uint32_t K, uint32_t* query_result_tags_ptr, std::vector<T *>& res, float* query_result_dists_ptr, void* backend_stats) {
                 tls_search_t0 = std::chrono::high_resolution_clock::now();
                 tls_cache_lookup_ms = 0.0;
+                tls_search_backend_ms = 0.0;
                 size_t current_active_id = active_insert_index_id.load();
                 (void)current_active_id;
                 

@@ -46,6 +46,7 @@ struct HybridMetrics {
     double avg_exact_hit_latency_ms;
     double avg_approx_hit_latency_ms;
     double avg_miss_penalty_ms;
+    double avg_backend_ms;
     double qps;
     double qps_per_thread;
     size_t memory_active_vectors;
@@ -226,7 +227,7 @@ void log_window_metrics(int window_idx, int repeat_idx, const HybridMetrics& hyb
                   "\"avg_hit_latency_ms\": {}, "
                   "\"avg_exact_hit_latency_ms\": {}, "
                   "\"avg_approx_hit_latency_ms\": {}, "
-                  "\"miss_penalty_ms\": {}, "
+                  "\"miss_penalty_ms\": {}, \"avg_backend_ms\": {}, "
                   "\"qps\": {}, "
                   "\"qps_per_thread\": {}, "
                   "\"memory_active_vectors\": {}, "
@@ -250,7 +251,7 @@ void log_window_metrics(int window_idx, int repeat_idx, const HybridMetrics& hyb
                   hybrid_metrics.total_queries,
                   hybrid_metrics.threads, hybrid_metrics.avg_latency_ms, hybrid_metrics.avg_hit_latency_ms,
                   hybrid_metrics.avg_exact_hit_latency_ms, hybrid_metrics.avg_approx_hit_latency_ms,
-                  hybrid_metrics.avg_miss_penalty_ms,
+                  hybrid_metrics.avg_miss_penalty_ms, hybrid_metrics.avg_backend_ms,
                   hybrid_metrics.qps, hybrid_metrics.qps_per_thread,
                   hybrid_metrics.memory_active_vectors, hybrid_metrics.memory_max_points,
                   hybrid_metrics.pca_active_regions, mini_index_counts,
@@ -277,7 +278,7 @@ void log_window_metrics(int window_idx, int repeat_idx, const HybridMetrics& hyb
                   "\"avg_hit_latency_ms\": {}, "
                   "\"avg_exact_hit_latency_ms\": {}, "
                   "\"avg_approx_hit_latency_ms\": {}, "
-                  "\"miss_penalty_ms\": {}, "
+                  "\"miss_penalty_ms\": {}, \"avg_backend_ms\": {}, "
                   "\"qps\": {}, "
                   "\"qps_per_thread\": {}, "
                   "\"memory_active_vectors\": {}, "
@@ -301,7 +302,7 @@ void log_window_metrics(int window_idx, int repeat_idx, const HybridMetrics& hyb
                   hybrid_metrics.total_queries,
                   hybrid_metrics.threads, hybrid_metrics.avg_latency_ms, hybrid_metrics.avg_hit_latency_ms,
                   hybrid_metrics.avg_exact_hit_latency_ms, hybrid_metrics.avg_approx_hit_latency_ms,
-                  hybrid_metrics.avg_miss_penalty_ms,
+                  hybrid_metrics.avg_miss_penalty_ms, hybrid_metrics.avg_backend_ms,
                   hybrid_metrics.qps, hybrid_metrics.qps_per_thread,
                   hybrid_metrics.memory_active_vectors, hybrid_metrics.memory_max_points,
                   hybrid_metrics.pca_active_regions, mini_index_counts,
@@ -385,7 +386,7 @@ void log_stream_metrics(
                   "\"exact_hit_ratio\": {}, \"approx_hit_ratio\": {}, "
                   "\"avg_latency_ms\": {}, \"avg_hit_latency_ms\": {}, "
                   "\"avg_exact_hit_latency_ms\": {}, \"avg_approx_hit_latency_ms\": {}, "
-                  "\"miss_penalty_ms\": {}, "
+                  "\"miss_penalty_ms\": {}, \"avg_backend_ms\": {}, "
                   "\"qps\": {}, "
                   "\"tail_latency_ms\": {{\"p50\": {}, \"p90\": {}, \"p95\": {}, \"p99\": {}}}, "
                   "\"recall_all\": {}, \"K\": {}, "
@@ -401,7 +402,7 @@ void log_stream_metrics(
                   interval.exact_hit_ratio, interval.approx_hit_ratio,
                   interval.avg_latency_ms, interval.avg_hit_latency_ms,
                   interval.avg_exact_hit_latency_ms, interval.avg_approx_hit_latency_ms,
-                  interval.avg_miss_penalty_ms,
+                  interval.avg_miss_penalty_ms, interval.avg_backend_ms,
                   interval.qps,
                   interval.p50, interval.p90, interval.p95, interval.p99,
                   recall_all.recall_all, recall_all.K,
@@ -419,7 +420,7 @@ void log_stream_metrics(
                   "\"exact_hit_ratio\": {}, \"approx_hit_ratio\": {}, "
                   "\"avg_latency_ms\": {}, \"avg_hit_latency_ms\": {}, "
                   "\"avg_exact_hit_latency_ms\": {}, \"avg_approx_hit_latency_ms\": {}, "
-                  "\"miss_penalty_ms\": {}, "
+                  "\"miss_penalty_ms\": {}, \"avg_backend_ms\": {}, "
                   "\"qps\": {}, "
                   "\"tail_latency_ms\": {{\"p50\": {}, \"p90\": {}, \"p95\": {}, \"p99\": {}}}, "
                   "\"recall_all\": {}, \"K\": {}, "
@@ -435,7 +436,7 @@ void log_stream_metrics(
                   interval.exact_hit_ratio, interval.approx_hit_ratio,
                   interval.avg_latency_ms, interval.avg_hit_latency_ms,
                   interval.avg_exact_hit_latency_ms, interval.avg_approx_hit_latency_ms,
-                  interval.avg_miss_penalty_ms,
+                  interval.avg_miss_penalty_ms, interval.avg_backend_ms,
                   interval.qps,
                   interval.p50, interval.p90, interval.p95, interval.p99,
                   recall_all.recall_all, recall_all.K,
@@ -472,6 +473,7 @@ HybridSearchResult hybrid_search(
     greator::QueryStats* stats = new greator::QueryStats[query_num];
     std::vector<double> latencies_ms(query_num, 0.0);
     std::vector<double> miss_penalties_ms(query_num, 0.0);
+    std::vector<double> backend_ms(query_num, 0.0);
     std::vector<bool> hit_results(query_num, false);
     std::vector<char> similar_hits(query_num, 0);
     std::vector<TagT> miss_tags(query_num * static_cast<size_t>(slot_list_size), 0);
@@ -540,6 +542,7 @@ HybridSearchResult hybrid_search(
             miss_penalties_ms[i] = std::chrono::duration<double, std::milli>(
                 std::chrono::high_resolution_clock::now() - start).count();
 
+            const auto backend_t0 = std::chrono::high_resolution_clock::now();
             backend.search(
                 query + i * query_aligned_dim,
                 slot_list_size,
@@ -547,6 +550,8 @@ HybridSearchResult hybrid_search(
                 query_result_dists.data() + i * slot_list_size,
                 nullptr,
                 stats + i);
+            backend_ms[i] = std::chrono::duration<double, std::milli>(
+                std::chrono::high_resolution_clock::now() - backend_t0).count();
 
             for (uint32_t j = 0; j < K; ++j)
                 out_tags[j] = miss_tags[i * slot_list_size + j] + 1;
@@ -612,14 +617,17 @@ HybridSearchResult hybrid_search(
     double avg_approx_hit_latency_ms =
         (actual_approx_hit_count > 0) ? total_approx_hit_latency_ms / actual_approx_hit_count : 0.0;
     double total_miss_penalty_ms = 0.0;
+    double total_backend_ms = 0.0;
     size_t miss_count = 0;
     for (size_t i = 0; i < query_num; i++) {
         if (!hit_results[i]) {
             total_miss_penalty_ms += miss_penalties_ms[i];
+            total_backend_ms += backend_ms[i];
             miss_count++;
         }
     }
     double avg_miss_penalty_ms = (miss_count > 0) ? total_miss_penalty_ms / miss_count : 0.0;
+    double avg_backend_ms = (miss_count > 0) ? total_backend_ms / miss_count : 0.0;
     double final_ratio = static_cast<double>(hit_count.load(std::memory_order_relaxed)) / query_num;
     auto global_end = std::chrono::high_resolution_clock::now();
     double total_time_ms = std::chrono::duration<double, std::milli>(global_end - global_start).count();
@@ -651,6 +659,7 @@ HybridSearchResult hybrid_search(
     metrics.avg_exact_hit_latency_ms = avg_exact_hit_latency_ms;
     metrics.avg_approx_hit_latency_ms = avg_approx_hit_latency_ms;
     metrics.avg_miss_penalty_ms = avg_miss_penalty_ms;
+    metrics.avg_backend_ms = avg_backend_ms;
     metrics.qps = qps;
     metrics.qps_per_thread = qps_per_thread;
     metrics.memory_active_vectors = 0;
