@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <fstream>
 #include <cstdint>
 #include <limits>
@@ -332,6 +333,7 @@ struct QuerySample {
     double miss_penalty_ms = 0.0;
     double recall = -1.0;
     bool hit = false;
+    bool approx_hit = false;
 };
 
 struct CacheSnapshot {
@@ -354,6 +356,7 @@ struct PhaseMetrics {
     double recall_sum = 0.0;
     double hit_recall_sum = 0.0;
     double miss_recall_sum = 0.0;
+    bool split_hits = false;
     std::vector<QuerySample> samples;
 
     size_t n_miss() const { return n_search > n_hit ? n_search - n_hit : 0; }
@@ -367,8 +370,10 @@ struct PhaseMetrics {
         return n_miss() ? miss_penalty_sum / static_cast<double>(n_miss()) : 0.0;
     }
 
-    void add(double latency_ms, bool hit, double recall, double miss_penalty_ms, bool stale_hit) {
-        samples.push_back(QuerySample{latency_ms, hit ? 0.0 : miss_penalty_ms, recall, hit});
+    void add(double latency_ms, bool hit, double recall, double miss_penalty_ms, bool stale_hit,
+             bool approx_hit = false) {
+        samples.push_back(QuerySample{latency_ms, hit ? 0.0 : miss_penalty_ms, recall, hit,
+                                      hit && approx_hit});
         n_search++;
         search_ms += latency_ms;
         if (recall >= 0.0) {
@@ -412,6 +417,12 @@ struct SliceStats {
     double p90 = 0.0;
     double p95 = 0.0;
     double p99 = 0.0;
+    size_t exact_hits = 0;
+    size_t approx_hits = 0;
+    double exact_latency_sum = 0.0;
+    double approx_latency_sum = 0.0;
+    double approx_recall_sum = 0.0;
+    size_t n_approx_recall = 0;
 
     double hit_ratio() const { return n ? static_cast<double>(hits) / static_cast<double>(n) : 0.0; }
     double avg_latency_ms() const { return n ? latency_sum / static_cast<double>(n) : 0.0; }
@@ -450,6 +461,17 @@ inline SliceStats stats_of(const std::vector<QuerySample>& samples, size_t begin
         if (q.hit) {
             st.hits++;
             st.hit_latency_sum += q.latency_ms;
+            if (q.approx_hit) {
+                st.approx_hits++;
+                st.approx_latency_sum += q.latency_ms;
+                if (q.recall >= 0.0) {
+                    st.approx_recall_sum += q.recall;
+                    st.n_approx_recall++;
+                }
+            } else {
+                st.exact_hits++;
+                st.exact_latency_sum += q.latency_ms;
+            }
             if (q.recall >= 0.0) {
                 st.hit_recall_sum += q.recall;
                 st.n_hit_recall++;
@@ -505,6 +527,29 @@ inline std::string index_vectors_json(const std::map<size_t, size_t>& index_vect
     return out;
 }
 
+inline std::string format_metric(double value) {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%.16g", value);
+    return std::string(buf);
+}
+
+// Exact-hit latency, approximate-hit latency, and approximate-hit recall.
+// Empty unless the caller classified Aker hits as exact or approximate.
+inline std::string aker_hit_split_json(const SliceStats& st, bool enabled) {
+    if (!enabled) {
+        return "";
+    }
+    const double exact_lat = st.exact_hits ? st.exact_latency_sum / static_cast<double>(st.exact_hits) : 0.0;
+    const double approx_lat = st.approx_hits ? st.approx_latency_sum / static_cast<double>(st.approx_hits) : 0.0;
+    const std::string approx_recall = st.n_approx_recall
+        ? format_metric(st.approx_recall_sum / static_cast<double>(st.n_approx_recall))
+        : "null";
+    return std::string(", \"avg_exact_hit_latency_ms\": ") + format_metric(exact_lat) +
+           ", \"avg_approx_hit_latency_ms\": " + format_metric(approx_lat) +
+           ", \"recall_approx_hits\": " + approx_recall +
+           ", \"approx_hit_count\": " + std::to_string(st.approx_hits);
+}
+
 inline void log_search_progress(const char* cache_name, const char* phase, size_t completed,
                                 size_t total, const PhaseMetrics& m, bool with_recall,
                                 uint32_t K, const CacheSnapshot& snap, size_t interval_begin,
@@ -533,9 +578,10 @@ inline void log_search_progress(const char* cache_name, const char* phase, size_
                      "\"low_recall_queries\": {}, \"very_low_recall_queries\": {}, "
                      "\"recall_cache_hits\": {}, \"cache_hit_count\": {}, "
                      "\"recall_hits\": {}, \"recall_misses\": {}, "
+                     "\"recall_cache_misses\": {}, \"cache_miss_count\": {}, "
                      "\"cum_hit_ratio\": {}, \"cum_hits\": {}, "
                      "\"cum_avg_latency_ms\": {}, \"cum_qps\": {}, \"elapsed_ms\": {}, "
-                     "\"cum_recall_all\": {}, \"cum_recall_hits\": {}, \"cum_recall_misses\": {}}}",
+                     "\"cum_recall_all\": {}, \"cum_recall_hits\": {}, \"cum_recall_misses\": {}{}}}",
                      cache_name, phase, completed, total,
                      begin, end > begin ? end - 1 : begin, iv.n,
                      iv.hit_ratio(), iv.hits, m.n_hit, m.n_miss(),
@@ -549,10 +595,11 @@ inline void log_search_progress(const char* cache_name, const char* phase, size_
                      iv.recall_all(), K,
                      iv.low_recall_queries, iv.very_low_recall_queries,
                      iv.recall_hits(), iv.hits,
-                     iv.recall_hits(), iv.recall_misses(),
+                     iv.recall_hits(), iv.recall_misses(), iv.recall_misses(), iv.misses,
                      cum.hit_ratio(), cum.hits,
                      cum.avg_latency_ms(), cum.qps(cum_elapsed), cum_elapsed,
-                     cum.recall_all(), cum.recall_hits(), cum.recall_misses());
+                     cum.recall_all(), cum.recall_hits(), cum.recall_misses(),
+                     aker_hit_split_json(iv, m.split_hits));
     } else {
         spdlog::info("{{\"event\": \"refresh_progress\", \"cache\": \"{}\", "
                      "\"phase\": \"{}\", \"completed\": {}, \"total\": {}, "
@@ -567,8 +614,9 @@ inline void log_search_progress(const char* cache_name, const char* phase, size_
                      "\"tail_latency_ms\": {{\"p50\": {}, \"p90\": {}, \"p95\": {}, \"p99\": {}}}, "
                      "\"recall_all\": null, \"K\": {}, "
                      "\"recall_cache_hits\": null, \"cache_hit_count\": {}, "
+                     "\"recall_cache_misses\": null, \"cache_miss_count\": {}, "
                      "\"cum_hit_ratio\": {}, \"cum_hits\": {}, "
-                     "\"cum_avg_latency_ms\": {}, \"cum_qps\": {}, \"elapsed_ms\": {}}}",
+                     "\"cum_avg_latency_ms\": {}, \"cum_qps\": {}, \"elapsed_ms\": {}{}}}",
                      cache_name, phase, completed, total,
                      begin, end > begin ? end - 1 : begin, iv.n,
                      iv.hit_ratio(), iv.hits, m.n_hit, m.n_miss(),
@@ -579,9 +627,10 @@ inline void log_search_progress(const char* cache_name, const char* phase, size_
                      snap.pca_active_regions, snap.point_evictions, snap.region_invalidations,
                      indexes,
                      iv.p50, iv.p90, iv.p95, iv.p99,
-                     K, iv.hits,
+                     K, iv.hits, iv.misses,
                      cum.hit_ratio(), cum.hits,
-                     cum.avg_latency_ms(), cum.qps(cum_elapsed), cum_elapsed);
+                     cum.avg_latency_ms(), cum.qps(cum_elapsed), cum_elapsed,
+                     aker_hit_split_json(iv, m.split_hits));
     }
 }
 
@@ -609,7 +658,8 @@ inline void log_search_phase(const char* cache_name, const char* phase, const Ph
                      "\"recall_all\": {}, \"K\": {}, "
                      "\"low_recall_queries\": {}, \"very_low_recall_queries\": {}, "
                      "\"recall_cache_hits\": {}, \"cache_hit_count\": {}, "
-                     "\"recall_hits\": {}, \"recall_misses\": {}}}",
+                     "\"recall_hits\": {}, \"recall_misses\": {}, "
+                     "\"recall_cache_misses\": {}, \"cache_miss_count\": {}{}}}",
                      phase, cache_name, m.n_search, m.n_hit, n_miss,
                      m.hit_ratio(), m.miss_ratio(), m.stale_hit_ratio(),
                      m.n_hit, m.n_search, threads,
@@ -624,7 +674,8 @@ inline void log_search_phase(const char* cache_name, const char* phase, const Ph
                      m.recall_all(), K,
                      all.low_recall_queries, all.very_low_recall_queries,
                      m.recall_hits(), m.n_hit,
-                     m.recall_hits(), m.recall_misses());
+                     m.recall_hits(), m.recall_misses(), m.recall_misses(), n_miss,
+                     aker_hit_split_json(all, m.split_hits));
     } else {
         spdlog::info("{{\"event\": \"refresh_{}\", \"cache\": \"{}\", "
                      "\"n_search\": {}, \"n_hit\": {}, \"n_miss\": {}, "
@@ -639,7 +690,8 @@ inline void log_search_phase(const char* cache_name, const char* phase, const Ph
                      "{}, "
                      "\"tail_latency_ms\": {{\"p50\": {}, \"p90\": {}, \"p95\": {}, \"p99\": {}}}, "
                      "\"recall_all\": null, \"K\": {}, "
-                     "\"recall_cache_hits\": null, \"cache_hit_count\": {}}}",
+                     "\"recall_cache_hits\": null, \"cache_hit_count\": {}, "
+                     "\"recall_cache_misses\": null, \"cache_miss_count\": {}{}}}",
                      phase, cache_name, m.n_search, m.n_hit, n_miss,
                      m.hit_ratio(), m.miss_ratio(), m.stale_hit_ratio(),
                      m.n_hit, m.n_search, threads,
@@ -651,8 +703,35 @@ inline void log_search_phase(const char* cache_name, const char* phase, const Ph
                      snap.pca_active_regions, snap.point_evictions, snap.region_invalidations,
                      indexes,
                      all.p50, all.p90, all.p95, all.p99,
-                     K, m.n_hit);
+                     K, m.n_hit, n_miss, aker_hit_split_json(all, m.split_hits));
     }
+}
+
+// Per-operation cache time beyond the backend write. avg_*_latency_ms is the
+// full operation (backend + cache). Both are milliseconds per insert or delete.
+inline std::string mutate_named_fields(const char* phase, double avg_latency_ms,
+                                      bool has_overhead, double avg_overhead_ms) {
+    const std::string kind(phase ? phase : "");
+    const char* latency_key = nullptr;
+    const char* overhead_key = nullptr;
+    if (kind == "insert") {
+        latency_key = "avg_insert_latency_ms";
+        overhead_key = "insert_overhead_ms";
+    } else if (kind == "delete") {
+        latency_key = "avg_delete_latency_ms";
+        overhead_key = "delete_overhead_ms";
+    } else {
+        return "";
+    }
+    char latency_buf[64];
+    std::snprintf(latency_buf, sizeof(latency_buf), "%.16g", avg_latency_ms);
+    std::string out = std::string(", \"") + latency_key + "\": " + latency_buf;
+    if (has_overhead) {
+        char overhead_buf[64];
+        std::snprintf(overhead_buf, sizeof(overhead_buf), "%.16g", avg_overhead_ms);
+        out += std::string(", \"") + overhead_key + "\": " + overhead_buf;
+    }
+    return out;
 }
 
 inline void log_mutate_phase(const char* cache_name, const char* phase, size_t n,
@@ -666,32 +745,36 @@ inline void log_mutate_phase(const char* cache_name, const char* phase, size_t n
     const double overhead_ms = split ? std::max(0.0, elapsed_ms - backend_ms) : 0.0;
     const double avg_backend = (split && n) ? backend_ms / static_cast<double>(n) : 0.0;
     const double avg_overhead = (split && n) ? overhead_ms / static_cast<double>(n) : 0.0;
+    const std::string named = mutate_named_fields(phase, avg, split, avg_overhead);
     if (extra >= 0.0 && split) {
         spdlog::info("{{\"event\": \"refresh_{}\", \"cache\": \"{}\", \"n\": {}, "
                      "\"delete_rate\": {}, \"elapsed_ms\": {}, \"avg_ms\": {}, \"qps\": {}, "
                      "\"backend_elapsed_ms\": {}, \"overhead_elapsed_ms\": {}, "
                      "\"avg_backend_ms\": {}, \"avg_overhead_ms\": {}, "
-                     "\"region_invalidations\": {}}}",
+                     "\"region_invalidations\": {}{}}}",
                      phase, cache_name, n, extra, elapsed_ms, avg, qps,
-                     backend_ms, overhead_ms, avg_backend, avg_overhead, region_invalidations);
+                     backend_ms, overhead_ms, avg_backend, avg_overhead, region_invalidations,
+                     named);
     } else if (extra >= 0.0) {
         spdlog::info("{{\"event\": \"refresh_{}\", \"cache\": \"{}\", \"n\": {}, "
                      "\"delete_rate\": {}, \"elapsed_ms\": {}, \"avg_ms\": {}, \"qps\": {}, "
-                     "\"region_invalidations\": {}}}",
-                     phase, cache_name, n, extra, elapsed_ms, avg, qps, region_invalidations);
+                     "\"region_invalidations\": {}{}}}",
+                     phase, cache_name, n, extra, elapsed_ms, avg, qps, region_invalidations,
+                     named);
     } else if (split) {
         spdlog::info("{{\"event\": \"refresh_{}\", \"cache\": \"{}\", \"n\": {}, "
                      "\"elapsed_ms\": {}, \"avg_ms\": {}, \"qps\": {}, "
                      "\"backend_elapsed_ms\": {}, \"overhead_elapsed_ms\": {}, "
                      "\"avg_backend_ms\": {}, \"avg_overhead_ms\": {}, "
-                     "\"region_invalidations\": {}}}",
+                     "\"region_invalidations\": {}{}}}",
                      phase, cache_name, n, elapsed_ms, avg, qps,
-                     backend_ms, overhead_ms, avg_backend, avg_overhead, region_invalidations);
+                     backend_ms, overhead_ms, avg_backend, avg_overhead, region_invalidations,
+                     named);
     } else {
         spdlog::info("{{\"event\": \"refresh_{}\", \"cache\": \"{}\", \"n\": {}, "
                      "\"elapsed_ms\": {}, \"avg_ms\": {}, \"qps\": {}, "
-                     "\"region_invalidations\": {}}}",
-                     phase, cache_name, n, elapsed_ms, avg, qps, region_invalidations);
+                     "\"region_invalidations\": {}{}}}",
+                     phase, cache_name, n, elapsed_ms, avg, qps, region_invalidations, named);
     }
 }
 

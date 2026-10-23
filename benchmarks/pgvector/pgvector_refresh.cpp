@@ -50,16 +50,17 @@ void log_mutate(const char* phase, size_t n, double elapsed_ms, const std::vecto
     const double p90 = percentile(samples, 0.90);
     const double p95 = percentile(samples, 0.95);
     const double p99 = percentile(samples, 0.99);
+    const std::string named = qvcache_refresh::mutate_named_fields(phase, avg, true, 0.0);
     if (extra >= 0.0) {
         spdlog::info("{{\"event\": \"refresh_{}\", \"cache\": \"pgvector\", \"n\": {}, "
                      "\"delete_rate\": {}, \"elapsed_ms\": {}, \"avg_ms\": {}, \"qps\": {}, "
-                     "\"tail_latency_ms\": {{\"p50\": {}, \"p90\": {}, \"p95\": {}, \"p99\": {}}}}}",
-                     phase, n, extra, elapsed_ms, avg, qps, p50, p90, p95, p99);
+                     "\"tail_latency_ms\": {{\"p50\": {}, \"p90\": {}, \"p95\": {}, \"p99\": {}}}}{}}}",
+                     phase, n, extra, elapsed_ms, avg, qps, p50, p90, p95, p99, named);
     } else {
         spdlog::info("{{\"event\": \"refresh_{}\", \"cache\": \"pgvector\", \"n\": {}, "
                      "\"elapsed_ms\": {}, \"avg_ms\": {}, \"qps\": {}, "
-                     "\"tail_latency_ms\": {{\"p50\": {}, \"p90\": {}, \"p95\": {}, \"p99\": {}}}}}",
-                     phase, n, elapsed_ms, avg, qps, p50, p90, p95, p99);
+                     "\"tail_latency_ms\": {{\"p50\": {}, \"p90\": {}, \"p95\": {}, \"p99\": {}}}}{}}}",
+                     phase, n, elapsed_ms, avg, qps, p50, p90, p95, p99, named);
     }
 }
 

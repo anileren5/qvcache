@@ -17,6 +17,7 @@
 #include <utility>
 #include <random>
 #include <numeric>
+#include <cstdio>
 #include <cstring>
 #include <sstream>
 
@@ -62,7 +63,18 @@ struct RecallAllMetrics {
 struct RecallHitMetrics {
     double recall_cache_hits;  // Use -1.0 to represent null
     size_t cache_hit_count;
+    double recall_cache_misses;  // -1.0 when the interval has no misses
+    size_t cache_miss_count;
 };
+
+inline std::string json_metric_or_null(double value) {
+    if (!(value >= 0.0)) {
+        return "null";
+    }
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%.16g", value);
+    return std::string(buf);
+}
 
 std::vector<uint32_t> parse_k_pool(const std::string& spec) {
     std::vector<uint32_t> pool;
@@ -148,42 +160,44 @@ RecallHitMetrics calculate_hit_recall(size_t K, TagT* groundtruth_ids, std::vect
                          const std::vector<bool>& hit_results, size_t query_num, size_t groundtruth_dim,
                          const uint32_t* k_per_query = nullptr, uint32_t result_stride = 0) {
     const uint32_t stride = result_stride == 0 ? static_cast<uint32_t>(K) : result_stride;
-    double total_recall = 0.0;
+    double total_hit_recall = 0.0;
+    double total_miss_recall = 0.0;
     size_t hit_count = 0;
+    size_t miss_count = 0;
     const TagT INVALID_ID = std::numeric_limits<TagT>::max();
     
     for (int32_t i = 0; i < query_num; i++) {
+        const uint32_t ki = k_per_query != nullptr ? k_per_query[i] : static_cast<uint32_t>(K);
+        std::set<uint32_t> groundtruth_closest_neighbors;
+        std::set<uint32_t> calculated_closest_neighbors;
+        for (uint32_t j = 0; j < ki; j++) {
+            groundtruth_closest_neighbors.insert(*(groundtruth_ids + i * groundtruth_dim + j));
+        }
+        for (uint32_t j = 0; j < ki; j++) {
+            TagT tag = *(query_result_tags.data() + static_cast<size_t>(i) * stride + j);
+            if (tag != INVALID_ID) {
+                calculated_closest_neighbors.insert(tag);
+            }
+        }
+        uint32_t matching_neighbors = 0;
+        for (uint32_t x : calculated_closest_neighbors) {
+            if (groundtruth_closest_neighbors.count(x - 1)) matching_neighbors++;
+        }
+        const double recall = ki > 0 ? matching_neighbors / static_cast<double>(ki) : 0.0;
         if (hit_results[i]) {
-            const uint32_t ki = k_per_query != nullptr ? k_per_query[i] : static_cast<uint32_t>(K);
-            std::set<uint32_t> groundtruth_closest_neighbors;
-            std::set<uint32_t> calculated_closest_neighbors;
-            for (uint32_t j = 0; j < ki; j++) {
-                groundtruth_closest_neighbors.insert(*(groundtruth_ids + i * groundtruth_dim + j));
-            }
-            // Filter out invalid IDs (padded results)
-            for (uint32_t j = 0; j < ki; j++) {
-                TagT tag = *(query_result_tags.data() + static_cast<size_t>(i) * stride + j);
-                if (tag != INVALID_ID) {
-                    calculated_closest_neighbors.insert(tag);
-                }
-            }
-            uint32_t matching_neighbors = 0;
-            for (uint32_t x : calculated_closest_neighbors) {
-                if (groundtruth_closest_neighbors.count(x - 1)) matching_neighbors++;
-            }
-            double recall = matching_neighbors / (double)ki;
-            total_recall += recall;
+            total_hit_recall += recall;
             hit_count++;
+        } else {
+            total_miss_recall += recall;
+            miss_count++;
         }
     }
     
     RecallHitMetrics metrics;
-    if (hit_count > 0) {
-        metrics.recall_cache_hits = total_recall / hit_count;
-    } else {
-        metrics.recall_cache_hits = -1.0;  // Use -1.0 to represent null
-    }
+    metrics.recall_cache_hits = hit_count > 0 ? total_hit_recall / static_cast<double>(hit_count) : -1.0;
     metrics.cache_hit_count = hit_count;
+    metrics.recall_cache_misses = miss_count > 0 ? total_miss_recall / static_cast<double>(miss_count) : -1.0;
+    metrics.cache_miss_count = miss_count;
     
     return metrics;
 }
@@ -222,7 +236,9 @@ void log_window_metrics(int window_idx, int repeat_idx, const HybridMetrics& hyb
                   "\"low_recall_queries\": {}, "
                   "\"very_low_recall_queries\": {}, "
                   "\"recall_cache_hits\": null, "
-                  "\"cache_hit_count\": {}}}",
+                  "\"cache_hit_count\": {}, "
+                  "\"recall_cache_misses\": {}, "
+                  "\"cache_miss_count\": {}}}",
                   window_idx, repeat_idx,
                   hybrid_metrics.hit_ratio, hybrid_metrics.hits,
                   hybrid_metrics.total_queries,
@@ -234,7 +250,9 @@ void log_window_metrics(int window_idx, int repeat_idx, const HybridMetrics& hyb
                   hybrid_metrics.p50, hybrid_metrics.p90, hybrid_metrics.p95, hybrid_metrics.p99,
                   recall_all_metrics.recall_all, recall_all_metrics.K,
                   recall_all_metrics.low_recall_queries, recall_all_metrics.very_low_recall_queries,
-                  recall_hit_metrics.cache_hit_count);
+                  recall_hit_metrics.cache_hit_count,
+                  json_metric_or_null(recall_hit_metrics.recall_cache_misses),
+                  recall_hit_metrics.cache_miss_count);
     } else {
         spdlog::info("{{\"event\": \"window_metrics\", "
                   "\"window_idx\": {}, "
@@ -258,7 +276,9 @@ void log_window_metrics(int window_idx, int repeat_idx, const HybridMetrics& hyb
                   "\"low_recall_queries\": {}, "
                   "\"very_low_recall_queries\": {}, "
                   "\"recall_cache_hits\": {}, "
-                  "\"cache_hit_count\": {}}}",
+                  "\"cache_hit_count\": {}, "
+                  "\"recall_cache_misses\": {}, "
+                  "\"cache_miss_count\": {}}}",
                   window_idx, repeat_idx,
                   hybrid_metrics.hit_ratio, hybrid_metrics.hits,
                   hybrid_metrics.total_queries,
@@ -270,7 +290,9 @@ void log_window_metrics(int window_idx, int repeat_idx, const HybridMetrics& hyb
                   hybrid_metrics.p50, hybrid_metrics.p90, hybrid_metrics.p95, hybrid_metrics.p99,
                   recall_all_metrics.recall_all, recall_all_metrics.K,
                   recall_all_metrics.low_recall_queries, recall_all_metrics.very_low_recall_queries,
-                  recall_hit_metrics.recall_cache_hits, recall_hit_metrics.cache_hit_count);
+                  recall_hit_metrics.recall_cache_hits, recall_hit_metrics.cache_hit_count,
+                  json_metric_or_null(recall_hit_metrics.recall_cache_misses),
+                  recall_hit_metrics.cache_miss_count);
     }
 }
 
@@ -303,6 +325,7 @@ void log_stream_metrics(
                   "\"tail_latency_ms\": {{\"p50\": {}, \"p90\": {}, \"p95\": {}, \"p99\": {}}}, "
                   "\"recall_all\": {}, \"K\": {}, "
                   "\"recall_cache_hits\": null, \"cache_hit_count\": {}, "
+                  "\"recall_cache_misses\": {}, \"cache_miss_count\": {}, "
                   "\"cum_hit_ratio\": {}, \"cum_hits\": {}, "
                   "\"cum_avg_latency_ms\": {}, \"cum_qps\": {}, \"elapsed_ms\": {}}}",
                   completed, total, query_begin, query_end,
@@ -316,6 +339,8 @@ void log_stream_metrics(
                   interval.p50, interval.p90, interval.p95, interval.p99,
                   recall_all.recall_all, recall_all.K,
                   recall_hits.cache_hit_count,
+                  json_metric_or_null(recall_hits.recall_cache_misses),
+                  recall_hits.cache_miss_count,
                   cum_hit_ratio, cum_hits, cum_avg_latency_ms, cum_qps, elapsed_ms);
     } else {
         spdlog::info("{{\"event\": \"stream_metrics\", "
@@ -330,6 +355,7 @@ void log_stream_metrics(
                   "\"tail_latency_ms\": {{\"p50\": {}, \"p90\": {}, \"p95\": {}, \"p99\": {}}}, "
                   "\"recall_all\": {}, \"K\": {}, "
                   "\"recall_cache_hits\": {}, \"cache_hit_count\": {}, "
+                  "\"recall_cache_misses\": {}, \"cache_miss_count\": {}, "
                   "\"cum_hit_ratio\": {}, \"cum_hits\": {}, "
                   "\"cum_avg_latency_ms\": {}, \"cum_qps\": {}, \"elapsed_ms\": {}}}",
                   completed, total, query_begin, query_end,
@@ -343,6 +369,8 @@ void log_stream_metrics(
                   interval.p50, interval.p90, interval.p95, interval.p99,
                   recall_all.recall_all, recall_all.K,
                   recall_hits.recall_cache_hits, recall_hits.cache_hit_count,
+                  json_metric_or_null(recall_hits.recall_cache_misses),
+                  recall_hits.cache_miss_count,
                   cum_hit_ratio, cum_hits, cum_avg_latency_ms, cum_qps, elapsed_ms);
     }
 }

@@ -17,6 +17,7 @@
 #include <utility>
 #include <random>
 #include <numeric>
+#include <cstdio>
 #include <cstring>
 
 // Backend header
@@ -64,7 +65,18 @@ struct RecallAllMetrics {
 struct RecallHitMetrics {
     double recall_cache_hits;  // Use -1.0 to represent null
     size_t cache_hit_count;
+    double recall_cache_misses;  // -1.0 when the interval has no misses
+    size_t cache_miss_count;
 };
+
+inline std::string json_metric_or_null(double value) {
+    if (!(value >= 0.0)) {
+        return "null";
+    }
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%.16g", value);
+    return std::string(buf);
+}
 
 template <typename T, typename TagT = uint32_t>
 RecallAllMetrics calculate_recall(size_t K, TagT* groundtruth_ids, std::vector<TagT>& query_result_tags, size_t query_num, size_t groundtruth_dim) {
@@ -115,41 +127,43 @@ RecallAllMetrics calculate_recall(size_t K, TagT* groundtruth_ids, std::vector<T
 template <typename T, typename TagT = uint32_t>
 RecallHitMetrics calculate_hit_recall(size_t K, TagT* groundtruth_ids, std::vector<TagT>& query_result_tags, 
                          const std::vector<bool>& hit_results, size_t query_num, size_t groundtruth_dim) {
-    double total_recall = 0.0;
+    double total_hit_recall = 0.0;
+    double total_miss_recall = 0.0;
     size_t hit_count = 0;
+    size_t miss_count = 0;
     const TagT INVALID_ID = std::numeric_limits<TagT>::max();
     
     for (int32_t i = 0; i < query_num; i++) {
+        std::set<uint32_t> groundtruth_closest_neighbors;
+        std::set<uint32_t> calculated_closest_neighbors;
+        for (int32_t j = 0; j < K; j++) {
+            groundtruth_closest_neighbors.insert(*(groundtruth_ids + i * groundtruth_dim + j));
+        }
+        for (int32_t j = 0; j < K; j++) {
+            TagT tag = *(query_result_tags.data() + i * K + j);
+            if (tag != INVALID_ID) {
+                calculated_closest_neighbors.insert(tag);
+            }
+        }
+        uint32_t matching_neighbors = 0;
+        for (uint32_t x : calculated_closest_neighbors) {
+            if (groundtruth_closest_neighbors.count(x - 1)) matching_neighbors++;
+        }
+        const double recall = matching_neighbors / static_cast<double>(K);
         if (hit_results[i]) {
-            std::set<uint32_t> groundtruth_closest_neighbors;
-            std::set<uint32_t> calculated_closest_neighbors;
-            for (int32_t j = 0; j < K; j++) {
-                groundtruth_closest_neighbors.insert(*(groundtruth_ids + i * groundtruth_dim + j));
-            }
-            // Filter out invalid IDs (padded results)
-            for (int32_t j = 0; j < K; j++) {
-                TagT tag = *(query_result_tags.data() + i * K + j);
-                if (tag != INVALID_ID) {
-                    calculated_closest_neighbors.insert(tag);
-                }
-            }
-            uint32_t matching_neighbors = 0;
-            for (uint32_t x : calculated_closest_neighbors) {
-                if (groundtruth_closest_neighbors.count(x - 1)) matching_neighbors++;
-            }
-            double recall = matching_neighbors / (double)K;
-            total_recall += recall;
+            total_hit_recall += recall;
             hit_count++;
+        } else {
+            total_miss_recall += recall;
+            miss_count++;
         }
     }
     
     RecallHitMetrics metrics;
-    if (hit_count > 0) {
-        metrics.recall_cache_hits = total_recall / hit_count;
-    } else {
-        metrics.recall_cache_hits = -1.0;  // Use -1.0 to represent null
-    }
+    metrics.recall_cache_hits = hit_count > 0 ? total_hit_recall / static_cast<double>(hit_count) : -1.0;
     metrics.cache_hit_count = hit_count;
+    metrics.recall_cache_misses = miss_count > 0 ? total_miss_recall / static_cast<double>(miss_count) : -1.0;
+    metrics.cache_miss_count = miss_count;
     
     return metrics;
 }
@@ -188,7 +202,9 @@ void log_window_metrics(int window_idx, int repeat_idx, const HybridMetrics& hyb
                   "\"low_recall_queries\": {}, "
                   "\"very_low_recall_queries\": {}, "
                   "\"recall_cache_hits\": null, "
-                  "\"cache_hit_count\": {}}}",
+                  "\"cache_hit_count\": {}, "
+                  "\"recall_cache_misses\": {}, "
+                  "\"cache_miss_count\": {}}}",
                   window_idx, repeat_idx,
                   hybrid_metrics.hit_ratio, hybrid_metrics.hits,
                   hybrid_metrics.total_queries,
@@ -200,7 +216,9 @@ void log_window_metrics(int window_idx, int repeat_idx, const HybridMetrics& hyb
                   hybrid_metrics.p50, hybrid_metrics.p90, hybrid_metrics.p95, hybrid_metrics.p99,
                   recall_all_metrics.recall_all, recall_all_metrics.K,
                   recall_all_metrics.low_recall_queries, recall_all_metrics.very_low_recall_queries,
-                  recall_hit_metrics.cache_hit_count);
+                  recall_hit_metrics.cache_hit_count,
+                  json_metric_or_null(recall_hit_metrics.recall_cache_misses),
+                  recall_hit_metrics.cache_miss_count);
     } else {
         spdlog::info("{{\"event\": \"window_metrics\", "
                   "\"window_idx\": {}, "
@@ -224,7 +242,9 @@ void log_window_metrics(int window_idx, int repeat_idx, const HybridMetrics& hyb
                   "\"low_recall_queries\": {}, "
                   "\"very_low_recall_queries\": {}, "
                   "\"recall_cache_hits\": {}, "
-                  "\"cache_hit_count\": {}}}",
+                  "\"cache_hit_count\": {}, "
+                  "\"recall_cache_misses\": {}, "
+                  "\"cache_miss_count\": {}}}",
                   window_idx, repeat_idx,
                   hybrid_metrics.hit_ratio, hybrid_metrics.hits,
                   hybrid_metrics.total_queries,
@@ -236,7 +256,9 @@ void log_window_metrics(int window_idx, int repeat_idx, const HybridMetrics& hyb
                   hybrid_metrics.p50, hybrid_metrics.p90, hybrid_metrics.p95, hybrid_metrics.p99,
                   recall_all_metrics.recall_all, recall_all_metrics.K,
                   recall_all_metrics.low_recall_queries, recall_all_metrics.very_low_recall_queries,
-                  recall_hit_metrics.recall_cache_hits, recall_hit_metrics.cache_hit_count);
+                  recall_hit_metrics.recall_cache_hits, recall_hit_metrics.cache_hit_count,
+                  json_metric_or_null(recall_hit_metrics.recall_cache_misses),
+                  recall_hit_metrics.cache_miss_count);
     }
 }
 
@@ -269,6 +291,7 @@ void log_stream_metrics(
                   "\"tail_latency_ms\": {{\"p50\": {}, \"p90\": {}, \"p95\": {}, \"p99\": {}}}, "
                   "\"recall_all\": {}, \"K\": {}, "
                   "\"recall_cache_hits\": null, \"cache_hit_count\": {}, "
+                  "\"recall_cache_misses\": {}, \"cache_miss_count\": {}, "
                   "\"cum_hit_ratio\": {}, \"cum_hits\": {}, "
                   "\"cum_avg_latency_ms\": {}, \"cum_qps\": {}, \"elapsed_ms\": {}}}",
                   completed, total, query_begin, query_end,
@@ -282,6 +305,8 @@ void log_stream_metrics(
                   interval.p50, interval.p90, interval.p95, interval.p99,
                   recall_all.recall_all, recall_all.K,
                   recall_hits.cache_hit_count,
+                  json_metric_or_null(recall_hits.recall_cache_misses),
+                  recall_hits.cache_miss_count,
                   cum_hit_ratio, cum_hits, cum_avg_latency_ms, cum_qps, elapsed_ms);
     } else {
         spdlog::info("{{\"event\": \"stream_metrics\", "
@@ -296,6 +321,7 @@ void log_stream_metrics(
                   "\"tail_latency_ms\": {{\"p50\": {}, \"p90\": {}, \"p95\": {}, \"p99\": {}}}, "
                   "\"recall_all\": {}, \"K\": {}, "
                   "\"recall_cache_hits\": {}, \"cache_hit_count\": {}, "
+                  "\"recall_cache_misses\": {}, \"cache_miss_count\": {}, "
                   "\"cum_hit_ratio\": {}, \"cum_hits\": {}, "
                   "\"cum_avg_latency_ms\": {}, \"cum_qps\": {}, \"elapsed_ms\": {}}}",
                   completed, total, query_begin, query_end,
@@ -309,6 +335,8 @@ void log_stream_metrics(
                   interval.p50, interval.p90, interval.p95, interval.p99,
                   recall_all.recall_all, recall_all.K,
                   recall_hits.recall_cache_hits, recall_hits.cache_hit_count,
+                  json_metric_or_null(recall_hits.recall_cache_misses),
+                  recall_hits.cache_miss_count,
                   cum_hit_ratio, cum_hits, cum_avg_latency_ms, cum_qps, elapsed_ms);
     }
 }

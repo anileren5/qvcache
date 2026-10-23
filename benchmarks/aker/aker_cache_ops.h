@@ -97,7 +97,8 @@ bool search(
     size_t vector_in_bytes,
     diskann::Metric metric,
     uint32_t* out_tags,
-    double* miss_penalty_ms = nullptr
+    double* miss_penalty_ms = nullptr,
+    bool* approx_hit = nullptr
 ) {
     const auto lookup_start = std::chrono::high_resolution_clock::now();
     std::vector<T> packed(dim);
@@ -113,6 +114,9 @@ bool search(
     bool similar = false, invalid = false;
     char* entry = akerGetCacheEntry(cache, query_view, &similar, &invalid, distance_for_type<T>(metric));
     const bool hit = (entry != nullptr && !invalid);
+    if (approx_hit != nullptr) {
+        *approx_hit = hit && similar;
+    }
     if (hit) {
         for (uint32_t j = 0; j < K; ++j) {
             char* slot = akerGetResultVectorSlotAt(entry, static_cast<int>(j));

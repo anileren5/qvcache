@@ -108,14 +108,16 @@ int run_refresh_bench(
 
     auto run_searches = [&](size_t n, const char* phase, const qvcache_refresh::LiveGroundtruth* gt) {
         qvcache_refresh::PhaseMetrics m;
+        m.split_hits = true;
         size_t interval_begin = 0;
         for (size_t i = 0; i < n; ++i) {
             std::vector<uint32_t> tags(K, INVALID);
             double miss_penalty = 0.0;
+            bool approx = false;
             auto s = std::chrono::high_resolution_clock::now();
             const bool hit = aker_ops::search<T>(
                 cache, backend, queries + i * qaligned, dim, K, slot_list_size,
-                vector_in_bytes, metric, tags.data(), &miss_penalty);
+                vector_in_bytes, metric, tags.data(), &miss_penalty, &approx);
             auto e = std::chrono::high_resolution_clock::now();
             const double ms = std::chrono::duration<double, std::milli>(e - s).count();
             double rec = -1.0;
@@ -131,7 +133,7 @@ int run_refresh_bench(
                     }
                 }
             }
-            m.add(ms, hit, rec, miss_penalty, stale);
+            m.add(ms, hit, rec, miss_penalty, stale, approx);
             if (report_interval > 0 &&
                 ((i + 1) % static_cast<size_t>(report_interval) == 0 || i + 1 == n)) {
                 qvcache_refresh::log_search_progress(
