@@ -15,31 +15,55 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstddef>
+#include <cstring>
+#include <stdexcept>
 #include "diskann/distance.h"
 
 namespace qvcache {
 
-    struct ArrayHash {
-        std::size_t operator()(const std::vector<uint8_t>& arr) const {
-            std::size_t h = 0;
-            for (auto v : arr) h = h * 31 + v;
-            return h;
-        }
-    };
-
     template <typename T>
     class PCAUtils {
     private:
+        // Bucket code lives in the key object. Same bytes as the old
+        // heap vector, so the same cell is found and θ ← α·θ is unchanged.
+        // 32 covers the pca_dim used in the benches. The inline bytes replace
+        // that vector's separate heap block, so the region map does not grow.
+        struct RegionKey {
+            static constexpr size_t cap = 32;
+            uint8_t bytes[cap]{};
+            uint8_t len = 0;
+
+            RegionKey() = default;
+            explicit RegionKey(size_t n) : len(static_cast<uint8_t>(n)) {}
+
+            size_t size() const { return len; }
+            uint8_t& operator[](size_t i) { return bytes[i]; }
+            const uint8_t& operator[](size_t i) const { return bytes[i]; }
+
+            bool operator==(const RegionKey& other) const {
+                return len == other.len && std::memcmp(bytes, other.bytes, len) == 0;
+            }
+        };
+
+        struct RegionKeyHash {
+            std::size_t operator()(const RegionKey& arr) const {
+                std::size_t h = 0;
+                for (size_t i = 0; i < arr.len; ++i) {
+                    h = h * 31 + arr.bytes[i];
+                }
+                return h;
+            }
+        };
+
         size_t dim;
         size_t PCA_DIM;
         size_t BUCKETS_PER_DIM;
         std::string disk_index_prefix;
         diskann::Metric metric = diskann::L2;
 
-        using RegionKey = std::vector<uint8_t>;
-        std::unordered_map<RegionKey, std::unordered_map<uint32_t, double>, ArrayHash> region_theta_map;
+        std::unordered_map<RegionKey, std::unordered_map<uint32_t, double>, RegionKeyHash> region_theta_map;
         // Saturating write penalty: 1 = fully trusted; α after one write.
-        std::unordered_map<RegionKey, double, ArrayHash> region_discount_map;
+        std::unordered_map<RegionKey, double, RegionKeyHash> region_discount_map;
         std::mutex region_theta_map_mutex;
         std::list<RegionKey> region_insertion_order;
         size_t max_regions;
@@ -66,7 +90,11 @@ namespace qvcache {
                  diskann::Metric metric_ = diskann::L2,
                  size_t max_regions_ = std::numeric_limits<size_t>::max())
             : dim(dim), PCA_DIM(pca_dim), BUCKETS_PER_DIM(buckets_per_dim),
-              disk_index_prefix(disk_index_prefix), metric(metric_), max_regions(max_regions_) {}
+              disk_index_prefix(disk_index_prefix), metric(metric_), max_regions(max_regions_) {
+            if (pca_dim > RegionKey::cap) {
+                throw std::invalid_argument("pca_dim exceeds inline region-key capacity");
+            }
+        }
 
         void set_write_l1_radius(size_t r) { write_l1_radius = r; }
         size_t get_write_l1_radius() const { return write_l1_radius; }
