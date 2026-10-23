@@ -1405,14 +1405,22 @@ namespace qvcache {
                 return search_strategy;
             }
 
+            // Milliseconds spent in the last insert/remove's backend call.
+            // The rest of that call is cache-layer overhead.
+            double last_write_backend_ms() const { return last_write_backend_ms_; }
+
             // Writes do not evict to make room. θ ← α·θ on v's 16-D cell.
             void insert(TagT id, const T* vector) {
                 {
                     std::lock_guard<std::mutex> lock(deleted_mutex);
                     deleted_ids.erase(id);
                 }
+                last_write_backend_ms_ = 0.0;
                 if (backend && backend->supports_updates()) {
+                    const auto t0 = std::chrono::high_resolution_clock::now();
                     backend->insert(id, vector);
+                    last_write_backend_ms_ = std::chrono::duration<double, std::milli>(
+                        std::chrono::high_resolution_clock::now() - t0).count();
                 }
                 try_admit_data_vector(id, vector);
                 stale_write_regions(vector);
@@ -1439,10 +1447,16 @@ namespace qvcache {
                         index->lazy_delete(mem_tag);
                     }
                 }
+                last_write_backend_ms_ = 0.0;
                 if (backend && backend->supports_updates()) {
+                    const auto t0 = std::chrono::high_resolution_clock::now();
                     backend->remove(id);
+                    last_write_backend_ms_ = std::chrono::duration<double, std::milli>(
+                        std::chrono::high_resolution_clock::now() - t0).count();
                 }
             }
+
+            double last_write_backend_ms_ = 0.0;
 
             void set_miss_admit_delta(uint32_t delta) { miss_admit_delta = delta; }
             uint32_t get_miss_admit_delta() const { return miss_admit_delta; }

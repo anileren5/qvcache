@@ -657,15 +657,36 @@ inline void log_search_phase(const char* cache_name, const char* phase, const Ph
 
 inline void log_mutate_phase(const char* cache_name, const char* phase, size_t n,
                              double elapsed_ms, double extra = -1.0,
-                             uint64_t region_invalidations = 0) {
+                             uint64_t region_invalidations = 0,
+                             double backend_ms = -1.0) {
     const double avg = n ? elapsed_ms / static_cast<double>(n) : 0.0;
     const double sec = elapsed_ms / 1000.0;
     const double qps = sec > 0.0 ? static_cast<double>(n) / sec : 0.0;
-    if (extra >= 0.0) {
+    const bool split = backend_ms >= 0.0;
+    const double overhead_ms = split ? std::max(0.0, elapsed_ms - backend_ms) : 0.0;
+    const double avg_backend = (split && n) ? backend_ms / static_cast<double>(n) : 0.0;
+    const double avg_overhead = (split && n) ? overhead_ms / static_cast<double>(n) : 0.0;
+    if (extra >= 0.0 && split) {
+        spdlog::info("{{\"event\": \"refresh_{}\", \"cache\": \"{}\", \"n\": {}, "
+                     "\"delete_rate\": {}, \"elapsed_ms\": {}, \"avg_ms\": {}, \"qps\": {}, "
+                     "\"backend_elapsed_ms\": {}, \"overhead_elapsed_ms\": {}, "
+                     "\"avg_backend_ms\": {}, \"avg_overhead_ms\": {}, "
+                     "\"region_invalidations\": {}}}",
+                     phase, cache_name, n, extra, elapsed_ms, avg, qps,
+                     backend_ms, overhead_ms, avg_backend, avg_overhead, region_invalidations);
+    } else if (extra >= 0.0) {
         spdlog::info("{{\"event\": \"refresh_{}\", \"cache\": \"{}\", \"n\": {}, "
                      "\"delete_rate\": {}, \"elapsed_ms\": {}, \"avg_ms\": {}, \"qps\": {}, "
                      "\"region_invalidations\": {}}}",
                      phase, cache_name, n, extra, elapsed_ms, avg, qps, region_invalidations);
+    } else if (split) {
+        spdlog::info("{{\"event\": \"refresh_{}\", \"cache\": \"{}\", \"n\": {}, "
+                     "\"elapsed_ms\": {}, \"avg_ms\": {}, \"qps\": {}, "
+                     "\"backend_elapsed_ms\": {}, \"overhead_elapsed_ms\": {}, "
+                     "\"avg_backend_ms\": {}, \"avg_overhead_ms\": {}, "
+                     "\"region_invalidations\": {}}}",
+                     phase, cache_name, n, elapsed_ms, avg, qps,
+                     backend_ms, overhead_ms, avg_backend, avg_overhead, region_invalidations);
     } else {
         spdlog::info("{{\"event\": \"refresh_{}\", \"cache\": \"{}\", \"n\": {}, "
                      "\"elapsed_ms\": {}, \"avg_ms\": {}, \"qps\": {}, "

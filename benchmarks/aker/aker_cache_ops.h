@@ -39,7 +39,7 @@ float (*distance_for_type(diskann::Metric metric))(uint8_t*, uint8_t*, size_t) {
 }
 
 template <typename T>
-void apply_insert(
+double apply_insert(
     anns_cache_c_wrapper_t* cache,
     qvcache::PgVectorBackend<T>& backend,
     uint32_t id,
@@ -49,7 +49,10 @@ void apply_insert(
     diskann::Metric metric,
     bool process_log
 ) {
+    const auto backend_t0 = std::chrono::high_resolution_clock::now();
     backend.insert(id, vec);
+    const double backend_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::high_resolution_clock::now() - backend_t0).count();
     const uint64_t vid = static_cast<uint64_t>(id) + 1;
     char* slot = akerCreateVectorSlot(
         vid, vector_in_bytes, reinterpret_cast<char*>(const_cast<T*>(vec)), 0, 0, 0.0f);
@@ -61,16 +64,21 @@ void apply_insert(
     }
     akerDestroyVectorView(view);
     akerDestroyVectorSlot(slot);
+    return backend_ms;
 }
 
 template <typename T>
-void apply_delete(
+double apply_delete(
     anns_cache_c_wrapper_t* cache,
     qvcache::PgVectorBackend<T>& backend,
     uint32_t id
 ) {
+    const auto backend_t0 = std::chrono::high_resolution_clock::now();
     backend.remove(id);
+    const double backend_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::high_resolution_clock::now() - backend_t0).count();
     akerMarkVectorDeleted(cache, static_cast<uint64_t>(id) + 1);
+    return backend_ms;
 }
 
 template <typename T>

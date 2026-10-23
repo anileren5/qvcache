@@ -153,18 +153,21 @@ int run_refresh_bench(
     const auto warmup = run_searches(n_warmup, "warmup", warmup_gt_ptr);
 
     double insert_ms = 0.0;
+    double insert_backend_ms = 0.0;
     if (n_insert > 0) {
         qvcache_refresh::synthesize_extra(live, n_insert, seed);
         auto t_ins0 = std::chrono::high_resolution_clock::now();
         for (uint32_t id : live.extra_ids) {
-            aker_ops::apply_insert<T>(cache, backend, id, live.ptr(id), dim, vector_in_bytes, metric, false);
+            insert_backend_ms += aker_ops::apply_insert<T>(
+                cache, backend, id, live.ptr(id), dim, vector_in_bytes, metric, false);
         }
         if (process_log) {
             aker_ops::process_log<T>(cache, metric);
         }
         auto t_ins1 = std::chrono::high_resolution_clock::now();
         insert_ms = std::chrono::duration<double, std::milli>(t_ins1 - t_ins0).count();
-        qvcache_refresh::log_mutate_phase("aker", "insert", live.extra_ids.size(), insert_ms);
+        qvcache_refresh::log_mutate_phase("aker", "insert", live.extra_ids.size(), insert_ms,
+                                         -1.0, 0, insert_backend_ms);
     } else {
         spdlog::info("{{\"event\": \"refresh_insert\", \"cache\": \"aker\", "
                      "\"n\": 0, \"skipped\": true, \"reason\": \"delete_only\"}}");
@@ -179,14 +182,16 @@ int run_refresh_bench(
     const size_t n_delete = static_cast<size_t>(
         std::llround(delete_rate * static_cast<double>(candidates.size())));
     auto t_del0 = std::chrono::high_resolution_clock::now();
+    double delete_backend_ms = 0.0;
     for (size_t i = 0; i < n_delete; ++i) {
         const uint32_t id = candidates[i];
         live.mark_deleted(id);
-        aker_ops::apply_delete<T>(cache, backend, id);
+        delete_backend_ms += aker_ops::apply_delete<T>(cache, backend, id);
     }
     auto t_del1 = std::chrono::high_resolution_clock::now();
     const double delete_ms = std::chrono::duration<double, std::milli>(t_del1 - t_del0).count();
-    qvcache_refresh::log_mutate_phase("aker", "delete", n_delete, delete_ms, delete_rate);
+    qvcache_refresh::log_mutate_phase("aker", "delete", n_delete, delete_ms, delete_rate, 0,
+                                     delete_backend_ms);
 
     omp_set_num_threads(gt_threads);
     qvcache_refresh::LiveGroundtruth gt;
